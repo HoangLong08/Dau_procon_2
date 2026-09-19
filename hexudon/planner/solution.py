@@ -130,10 +130,11 @@ def build_context(
     dist_step: DistTable,
     dist_next: Optional[DistTable] = None,
     weights: Optional[Weights] = None,
+    steps_override: Optional[int] = None,
 ) -> DayContext:
     patrols = [i for i, a in enumerate(agents) if a.kind == rules.PATROL]
     cars = [i for i, a in enumerate(agents) if a.kind == rules.REFUEL]
-    steps = config.steps_of_day(day)
+    steps = int(steps_override) if steps_override else config.steps_of_day(day)
     next_steps = config.steps_of_day(day + 1) if day + 1 < config.n_days else 0
     return DayContext(
         config=config,

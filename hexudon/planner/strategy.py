@@ -88,6 +88,7 @@ class MatchStrategist:
         state: DayState,
         deadline: Optional[float] = None,
         submit: Optional[Callable[[List[List[int]]], bool]] = None,
+        steps_override: Optional[int] = None,
     ) -> Decoded:
         """Lập kế hoạch cho một ngày; gọi submit ngay khi có bài an toàn."""
         cfg = self.config
@@ -101,6 +102,7 @@ class MatchStrategist:
         ctx = make_context(
             cfg, state.day, agents, status, [s.stocks for s in cfg.spots],
             self.visited_brands, weights=self.weights, forecast_status=forecast_status,
+            steps_override=steps_override,
         )
         if deadline is None:
             deadline = time.monotonic() + self.budget_for(state)

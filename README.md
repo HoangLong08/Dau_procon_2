@@ -70,6 +70,34 @@ tổng **số phần**, rồi thời gian phản hồi. Với tham số map chí
 | `hexudon/offline/` | bot đối thủ, runner nhiều đội, sinh map, server luyện tập, benchmark |
 | `tests/` | kiểm thử, gồm golden test tái hiện ví dụ từng bước của ban tổ chức |
 
+## Ngày thi
+
+Trước trận, chạy một lần để chắc chắn máy và mạng đều ổn:
+
+```bash
+python -m unittest discover -s tests            # phải xanh toàn bộ
+python -m hexudon serve --size 16 --teams 1 &   # server luyện tập tại chỗ
+python -m hexudon play --url http://127.0.0.1:8099 --match m-local --token tok-0                        --search-seconds 3.0 --role-seconds 20
+```
+
+Khi vào trận thật, chỉ cần đổi `--url`, `--match`, `--token`. Luôn bật
+`--replay replays/<mã trận>.jsonl` để có nhật ký đối chiếu nếu có tranh chấp.
+
+Bot tự xử lý các tình huống sau mà không cần can thiệp:
+
+| Tình huống | Bot làm gì |
+|---|---|
+| Server chưa mở (HTTP 425) | tiếp tục hỏi, 250 ms một lần |
+| Poll quá nhanh (HTTP 429) | chờ rồi thử lại |
+| Mất mạng, timeout, lỗi 5xx | thử lại với giãn cách tăng dần, giữ nguyên bài đã dựng |
+| Bài bị từ chối | gửi bài an toàn; nếu vẫn bị từ chối thì gửi bài đứng yên (luôn hợp lệ) |
+| Server đòi kiểu bọc JSON khác | tự thử `[...]`, `{"actions": ...}`, `{"types": ...}` rồi nhớ kiểu đúng |
+| Server đánh số ngày từ 1 | nhận ra qua lỗi số bước, tự lùi chỉ số ngày cho cả trận |
+| Planner lỗi bất ngờ | bài an toàn đã gửi trước đó vẫn có hiệu lực |
+
+Chỉnh ngân sách theo hạn thật của ban tổ chức: `--search-seconds` nên bằng hạn
+mỗi ngày trừ khoảng 2 giây. Với hạn 5 giây thì để mặc định 3.0.
+
 ## Kiểm thử
 
 ```bash

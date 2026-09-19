@@ -34,6 +34,9 @@ class HttpTransport(Transport):
         self.last_day = -1
         self.config: Optional[MatchConfig] = None
         self.kinds: Optional[List[int]] = None
+        self.actions_style: Optional[str] = None   # 'bare' hoặc 'wrapped', học từ lần gửi đầu
+        self.assignment_body = None
+        self.body_style = None
 
     # ---- tầng HTTP ----
 
@@ -95,12 +98,23 @@ class HttpTransport(Transport):
             time.sleep(self.poll_seconds)
 
     def send_assignment(self, kinds: Sequence[int]) -> Ack:
+        """Gửi mảng loại xe. Thử các kiểu bọc JSON khác nếu server từ chối kiểu mặc định."""
         self.kinds = list(kinds)
-        status, payload = self._call_with_retry("POST", "/assignment", list(kinds))
-        ok = status == 200
-        if not ok:
-            self.log(f"gửi vai trò thất bại (HTTP {status}): {payload}")
-        return Ack(ok=ok, reason=None if ok else str(status), raw=payload)
+        bodies = [list(kinds), {"types": list(kinds)}, {"kinds": list(kinds)},
+                  {"agents": list(kinds)}]
+        if self.body_style is not None:
+            bodies.insert(0, self.body_style("assignment", list(kinds)))
+        last = None
+        for body in bodies:
+            status, payload = self._call_with_retry("POST", "/assignment", body)
+            if status == 200:
+                self.assignment_body = body
+                return Ack(ok=True, raw=payload)
+            last = (status, payload)
+            if status in (401, 403, 404, 425, 0):
+                break
+        self.log(f"gửi vai trò thất bại (HTTP {last[0]}): {last[1]}")
+        return Ack(ok=False, reason=str(last[0]), raw=last[1] if isinstance(last[1], dict) else None)
 
     def wait_day_state(self, kinds: Optional[Sequence[int]] = None) -> DayState:
         kinds = kinds if kinds is not None else self.kinds
@@ -118,16 +132,35 @@ class HttpTransport(Transport):
             time.sleep(self.poll_seconds)
 
     def send_actions(self, day: int, plan: List[List[int]]) -> Ack:
-        status, payload = self._call_with_retry("POST", "/actions", plan)
-        ok = status == 200
-        reason = None
-        if isinstance(payload, dict):
-            reason = payload.get("reason") or payload.get("error")
-            if payload.get("ok") is False:
-                ok = False
-        if not ok:
-            self.log(f"bài ngày {day} bị từ chối (HTTP {status}): {reason or payload}")
-        return Ack(ok=ok, reason=reason, raw=payload if isinstance(payload, dict) else None)
+        """Gửi kế hoạch ngày. Ghi nhớ kiểu bọc JSON mà server chấp nhận."""
+        bodies = [plan]
+        if self.actions_style == "wrapped":
+            bodies = [{"day": day, "actions": plan}, plan]
+        elif self.actions_style is None:
+            bodies = [plan, {"day": day, "actions": plan}, {"actions": plan}]
+        last = (0, None)
+        for body in bodies:
+            status, payload = self._call_with_retry("POST", "/actions", body)
+            reason = None
+            ok = status == 200
+            if isinstance(payload, dict):
+                reason = payload.get("reason") or payload.get("error")
+                if payload.get("ok") is False:
+                    ok = False
+            if ok:
+                self.actions_style = "wrapped" if isinstance(body, dict) else "bare"
+                return Ack(ok=True, reason=None, raw=payload if isinstance(payload, dict) else None)
+            last = (status, payload)
+            # lỗi luật chơi thì đổi kiểu bọc cũng vô ích
+            if reason and reason.startswith("E_") and reason != "E_BAD_FORMAT":
+                break
+            if status in (401, 403, 409, 425, 0):
+                break
+        status, payload = last
+        reason = payload.get("reason") or payload.get("error") if isinstance(payload, dict) else None
+        self.log(f"bài ngày {day} bị từ chối (HTTP {status}): {reason or payload}")
+        return Ack(ok=False, reason=reason or str(status),
+                   raw=payload if isinstance(payload, dict) else None)
 
     def get_result(self) -> Optional[dict]:
         status, payload = self._call("GET", "/result")

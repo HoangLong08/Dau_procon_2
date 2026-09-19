@@ -20,6 +20,7 @@ def make_context(
     visited_brands: Set[int],
     weights: Optional[Weights] = None,
     forecast_status: Optional[Dict[int, int]] = None,
+    steps_override: Optional[int] = None,
 ) -> DayContext:
     """Dựng ngữ cảnh ngày, kèm các bảng khoảng cách."""
     graph = DayGraph(config, road_status)
@@ -41,6 +42,7 @@ def make_context(
         dist_step=dist_step,
         dist_next=dist_next,
         weights=weights,
+        steps_override=steps_override,
     )
 
 
