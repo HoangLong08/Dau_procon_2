@@ -1,0 +1,32 @@
+# Tài liệu nội bộ, ý tưởng, spec: không đẩy lên git
+docs/
+*.pdf
+TheLe.md
+CLAUDE.md
+AGENTS.md
+
+# Công cụ trợ lý
+.claude/
+.cursor/
+.aider*
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# Dữ liệu sinh ra khi chạy
+replays/
+experiments/
+artifacts/
+*.jsonl
+*.log
+
+# Hệ điều hành / IDE
+.DS_Store
+.idea/
+.vscode/

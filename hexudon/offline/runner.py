@@ -1,0 +1,116 @@
+"""Chạy một trận nhiều đội tại chỗ, có giao thông cộng dồn đúng luật."""
+
+import time
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Sequence
+
+from .. import rules
+from ..model import AgentState, DayState, MatchConfig
+from ..simulator import DayResult, road_status_from_history, run_day, wait_plan
+from ..traffic import accuracy
+
+
+@dataclass
+class TeamRecord:
+    name: str
+    kinds: List[int]
+    brands: set = field(default_factory=set)
+    daily_types: int = 0
+    servings: int = 0
+    invalid_days: int = 0
+    plan_seconds: List[float] = field(default_factory=list)
+    agents: List[AgentState] = field(default_factory=list)
+
+    def score(self):
+        return (len(self.brands), self.daily_types, self.servings)
+
+
+@dataclass
+class MatchOutcome:
+    teams: List[TeamRecord]
+    days: List[dict]
+    forecast_accuracy: List[dict] = field(default_factory=list)
+
+    def ranking(self) -> List[TeamRecord]:
+        return sorted(self.teams, key=lambda t: t.score(), reverse=True)
+
+    def winner(self) -> TeamRecord:
+        return self.ranking()[0]
+
+
+def run_match(config: MatchConfig, bots: Sequence, log=None, collect_forecast=False) -> MatchOutcome:
+    """Chạy trọn trận. Mỗi bot là một đối tượng theo giao diện offline.bots.Bot."""
+    log = log or (lambda msg: None)
+    records: List[TeamRecord] = []
+    for bot in bots:
+        kinds = list(bot.select_roles())
+        if len(kinds) != config.n_agents:
+            kinds = [rules.PATROL] * config.n_agents
+        agents = [AgentState(kinds[i], config.agent_starts[i], config.fuel_limits)
+                  for i in range(config.n_agents)]
+        records.append(TeamRecord(name=getattr(bot, "name", "bot"), kinds=kinds, agents=agents))
+
+    stay_history: List[Dict[int, int]] = []
+    day_logs: List[dict] = []
+    forecast_rows: List[dict] = []
+
+    for day in range(config.n_days):
+        steps = config.steps_of_day(day)
+        status = ({c: rules.SMOOTH for c in config.road_cells} if day == 0
+                  else road_status_from_history(config, stay_history))
+        combined: Dict[int, int] = {}
+        day_entry = {"day": day, "steps": steps, "teams": []}
+
+        for idx, (bot, rec) in enumerate(zip(bots, records)):
+            others = [
+                [AgentState(o.kind, o.pos, o.fuel) for o in other.agents]
+                for j, other in enumerate(records) if j != idx
+            ]
+            state = DayState(day=day, agents=[AgentState(a.kind, a.pos, a.fuel) for a in rec.agents],
+                             road_status=dict(status), others=others, ends_at=None)
+            t0 = time.monotonic()
+            try:
+                plan = bot.plan(state)
+            except Exception as exc:  # bot lỗi thì coi như không gửi bài
+                log(f"ngày {day} đội {rec.name}: bot lỗi {exc!r}")
+                plan = None
+            elapsed = time.monotonic() - t0
+            rec.plan_seconds.append(elapsed)
+
+            stocks = [s.stocks for s in config.spots]
+            result = None
+            if plan is not None:
+                result = run_day(config, steps, rec.agents, plan, stocks, status)
+                if not result.ok:
+                    log(f"ngày {day} đội {rec.name}: bài KHÔNG hợp lệ ({result.error})")
+                    rec.invalid_days += 1
+                    result = None
+            if result is None:
+                result = run_day(config, steps, rec.agents, wait_plan(config.n_agents, steps),
+                                 stocks, status)
+
+            rec.brands |= result.brands
+            rec.daily_types += len(result.brands)
+            rec.servings += result.servings
+            rec.agents = [AgentState(rec.kinds[i], result.end_pos[i], result.end_fuel[i])
+                          for i in range(config.n_agents)]
+            for cell, n in result.stay.items():
+                combined[cell] = combined.get(cell, 0) + n
+            if hasattr(bot, "observe"):
+                bot.observe(state, result)
+            day_entry["teams"].append({
+                "name": rec.name,
+                "types": len(result.brands),
+                "servings": result.servings,
+                "seconds": round(elapsed, 3),
+            })
+
+        stay_history.append(combined)
+        if collect_forecast and day + 1 < config.n_days:
+            actual_next = road_status_from_history(config, stay_history)
+            forecast_rows.append({"day": day + 1, "actual": actual_next})
+        day_logs.append(day_entry)
+        log(f"ngày {day}: " + " | ".join(
+            f"{t['name']} {t['types']} loại / {t['servings']} phần" for t in day_entry["teams"]))
+
+    return MatchOutcome(teams=records, days=day_logs, forecast_accuracy=forecast_rows)
