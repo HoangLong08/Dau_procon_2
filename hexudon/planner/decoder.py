@@ -320,5 +320,10 @@ def decode(ctx: DayContext, sol: DaySolution) -> Decoded:
     """Giải mã nghiệm thành kế hoạch hợp lệ kèm điểm."""
     plan, truncated, dropped = build_plan(ctx, sol)
     plan, result, cuts = repair_to_valid(ctx, plan)
+    if not result.ok:
+        # không sửa nổi thành bài hợp lệ: chấm điểm nó sẽ nổ IndexError vì
+        # end_pos rỗng. Trả điểm tệ nhất để ALNS không bao giờ chọn nghiệm này.
+        return Decoded(plan=plan, result=result, score=float("-inf"),
+                       truncated=truncated + cuts, dropped_meets=dropped)
     score = score_day(ctx, result, truncated=truncated + cuts, dropped_meets=dropped)
     return Decoded(plan=plan, result=result, score=score, truncated=truncated + cuts, dropped_meets=dropped)

@@ -85,10 +85,13 @@ def rollout(
     seed: int = 0,
     deadline: Optional[float] = None,
     seconds_per_day: float = 0.0,
-) -> Tuple[int, int, int]:
+    with_days: bool = False,
+):
     """Chơi thử cả trận một mình với trạng thái đường dự báo. Trả (L, D, Q).
 
     seconds_per_day = 0 nghĩa là chỉ dùng bộ dựng nghiệm tham lam (tất định, ~5 ms/ngày).
+    `with_days=True` trả thêm số ngày thực sự chơi được: một mẫu bị cắt giữa
+    chừng KHÔNG so sánh được với mẫu chơi đủ, nên người gọi phải loại nó ra.
     """
     agents = [AgentState(kinds[i], config.agent_starts[i], config.fuel_limits)
               for i in range(config.n_agents)]
@@ -99,6 +102,7 @@ def rollout(
     prev_status = None
     rng = random.Random(seed)
 
+    days_done = 0
     for day in range(config.n_days):
         if deadline is not None and time.monotonic() >= deadline:
             break
@@ -120,15 +124,19 @@ def rollout(
         servings += result.servings
         agents = [AgentState(kinds[i], result.end_pos[i], result.end_fuel[i])
                   for i in range(config.n_agents)]
-        prev_status = status
-        status = forecast.predict(status, prev_status, own_stay_today=result.stay,
-                                  steps_today=config.steps_of_day(day))
-    return (len(visited), daily_types, servings)
+        # dự báo phải nhận HÔM NAY và HÔM QUA; truyền hôm nay hai lần thì
+        # công thức hai ngày của luật thành vô nghĩa đúng lúc nó cần nhất
+        status, prev_status = forecast.predict(
+            status, prev_status, own_stay_today=result.stay,
+            steps_today=config.steps_of_day(day)), status
+        days_done += 1
+    score = (len(visited), daily_types, servings)
+    return (score, days_done) if with_days else score
 
 
 def select_roles(
     config: MatchConfig,
-    budget_seconds: float = 20.0,
+    budget_seconds: float = 3.0,
     weights: Optional[Weights] = None,
     seed: int = 0,
     log: Optional[Callable[[str], None]] = None,
@@ -136,7 +144,7 @@ def select_roles(
     """Chọn mảng loại xe. Hết giờ vẫn luôn trả về một phương án hợp lệ."""
     log = log or (lambda msg: None)
     started = time.monotonic()
-    hard_deadline = started + max(1.0, budget_seconds)
+    hard_deadline = started + max(0.2, budget_seconds)
     options = candidates(config)
     forecast = TrafficForecast(config, n_patrols=max(1, config.n_agents - 1))
 
@@ -144,8 +152,12 @@ def select_roles(
     for cand in options:
         if time.monotonic() >= hard_deadline:
             break
-        cand.score = rollout(config, cand.kinds, forecast, weights=weights,
-                             seed=seed, deadline=hard_deadline)
+        cand.score, days_done = rollout(config, cand.kinds, forecast, weights=weights,
+                                        seed=seed, deadline=hard_deadline, with_days=True)
+        if days_done < config.n_days:
+            # mẫu dở dang xếp hạng cùng mẫu đủ sẽ chọn sai; thà bỏ đi
+            log(f"vai trò {cand.label}: bỏ, chỉ chơi được {days_done}/{config.n_days} ngày")
+            continue
         cand.evaluated = True
         log(f"vai trò {cand.label}: L={cand.score[0]} D={cand.score[1]} Q={cand.score[2]}")
 

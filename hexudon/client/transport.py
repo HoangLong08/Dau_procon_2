@@ -17,14 +17,16 @@ class Transport:
     def get_setup(self) -> MatchConfig:
         raise NotImplementedError
 
-    def send_assignment(self, kinds: Sequence[int]) -> Ack:
+    def send_assignment(self, kinds: Sequence[int], deadline: Optional[float] = None) -> Ack:
         raise NotImplementedError
 
     def wait_day_state(self, kinds: Optional[Sequence[int]] = None) -> DayState:
         """Chặn tới khi có ngày mới; ném MatchEnded khi hết trận."""
         raise NotImplementedError
 
-    def send_actions(self, day: int, plan: List[List[int]]) -> Ack:
+    def send_actions(self, day: int, plan: List[List[int]],
+                     deadline: Optional[float] = None) -> Ack:
+        """`deadline` là mốc time.monotonic() không được vượt qua."""
         raise NotImplementedError
 
     def get_result(self) -> Optional[dict]:

@@ -55,6 +55,9 @@ class LocalMatch:
         self.by_token = {t.token: t for t in self.teams}
         self.day = 0
         self.started_at = time.time() + start_delay
+        # báo đúng giờ mở trận cho client, như server thật: nếu không, bot không
+        # có cách nào biết ngân sách chọn vai trò đang ăn vào ngày thi
+        self.config.starts_at = self.started_at
         self.day_deadline = self.started_at + config.seconds_of_day(0)
         self.stay_history: List[Dict[int, int]] = []
         self.status = {c: rules.SMOOTH for c in config.road_cells}
@@ -94,17 +97,21 @@ class LocalMatch:
             team.plan = [list(seq) for seq in plan]
             team.submitted_day = self.day
             team.response_seconds = max(0.0, time.time() - (self.day_deadline - self.config.seconds_of_day(self.day)))
-            self.maybe_advance()
             return {"ok": True, "day": self.day + 1}
 
     def maybe_advance(self) -> None:
-        """Sang ngày mới khi mọi đội đã nộp hoặc hết hạn."""
+        """Sang ngày mới khi hết hạn.
+
+        KHÔNG đóng ngày sớm chỉ vì mọi đội đã nộp: luật là "bài hợp lệ cuối cùng
+        TRƯỚC HẠN được áp dụng", nên bot còn quyền gửi lại bài tốt hơn tới phút
+        chót. Đóng sớm làm bài an toàn 10 ms khoá luôn ngày, bài tinh chỉnh bị
+        từ chối vì rơi sang ngày sau, và mọi đo đạc tại chỗ hoá ra chỉ đo bộ dựng
+        nghiệm tham lam chứ không đo bot.
+        """
         with self.lock:
             if self.finished or not self.open_for_play():
                 return
-            human = [t for t in self.teams if t.bot is None]
-            all_in = all(t.submitted_day == self.day for t in human) if human else False
-            if not all_in and time.time() < self.day_deadline:
+            if time.time() < self.day_deadline:
                 return
             self.resolve_day()
 

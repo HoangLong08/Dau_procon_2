@@ -5,23 +5,31 @@ Chỉ dùng thư viện chuẩn. Poll tối thiểu 200 ms để tránh HTTP 429
 """
 
 import json
+import threading
 import time
 import urllib.error
 import urllib.request
 from typing import Callable, List, Optional, Sequence, Tuple
 
-from ..model import Ack, DayState, MatchConfig
+from ..model import Ack, DayState, MatchConfig, ProtocolError
 from .transport import MatchEnded, Transport
 
 POLL_SECONDS = 0.25
 REQUEST_TIMEOUT = 2.0
 RETRY_BACKOFF = (0.25, 0.5, 1.0)
+#: mã HTTP nghĩa là trận đã đóng, khác với sự cố tạm thời
+TERMINAL_STATUSES = (409, 410)
+#: cứ ngần này lần /state hỏng thì hỏi /result một lần
+RESULT_PROBE_EVERY = 8
+#: im lặng quá lâu thì thoát hẳn thay vì quay vô hạn
+GIVE_UP_SECONDS = 120.0
 
 
 class HttpTransport(Transport):
     def __init__(self, base_url: str, match_id: str, token: str,
                  poll_seconds: float = POLL_SECONDS,
                  timeout: float = REQUEST_TIMEOUT,
+                 give_up_seconds: float = GIVE_UP_SECONDS,
                  log: Optional[Callable[[str], None]] = None,
                  replay: Optional[Callable[[dict], None]] = None):
         base = base_url.rstrip("/")
@@ -29,6 +37,7 @@ class HttpTransport(Transport):
         self.token = token
         self.poll_seconds = poll_seconds
         self.timeout = timeout
+        self.give_up_seconds = give_up_seconds
         self.log = log or (lambda msg: None)
         self.replay = replay or (lambda entry: None)
         self.last_day = -1
@@ -40,15 +49,50 @@ class HttpTransport(Transport):
 
     # ---- tầng HTTP ----
 
-    def _call(self, method: str, path: str, body=None) -> Tuple[int, Optional[dict]]:
-        data = json.dumps(body).encode() if body is not None else None
-        req = urllib.request.Request(
-            self.api + path, data=data, method=method,
-            headers={"Authorization": "Bearer " + self.token,
-                     "Content-Type": "application/json"},
+    def _call(self, method: str, path: str, body=None,
+              deadline: Optional[float] = None) -> Tuple[int, Optional[dict]]:
+        """Gọi server với chặn cứng theo đồng hồ treo tường.
+
+        `timeout` của socket chỉ áp cho MỖI LẦN ĐỌC: một server nhả body từng
+        byte kéo được một request dài vô hạn mà không hề timeout (đo được 58 s
+        với timeout 2 s). Nên cuộc gọi chạy trong luồng riêng và bị bỏ rơi khi
+        hết giờ — thà mất một request còn hơn mất cả ngày.
+        """
+        budget = self.timeout
+        if deadline is not None:
+            budget = min(budget, deadline - time.monotonic())
+        if budget <= 0:
+            self.log(f"bỏ qua {method} {path}: đã quá hạn của ngày")
+            return 0, None
+
+        done: List[Tuple[int, Optional[dict]]] = []
+        worker = threading.Thread(
+            target=lambda: done.append(self._call_blocking(method, path, body, budget)),
+            daemon=True,
         )
+        worker.start()
+        worker.join(budget)
+        if not done:
+            self.log(f"lỗi mạng {method} {path}: quá {budget:.1f}s, bỏ cuộc gọi")
+            self.replay({"t": time.time(), "method": method, "path": path,
+                         "status": 0, "error": f"wall-clock timeout {budget:.1f}s"})
+            return 0, None
+        return done[0]
+
+    def _call_blocking(self, method: str, path: str, body, timeout: float) -> Tuple[int, Optional[dict]]:
+        data = json.dumps(body).encode() if body is not None else None
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            req = urllib.request.Request(
+                self.api + path, data=data, method=method,
+                headers={"Authorization": "Bearer " + self.token,
+                         "Content-Type": "application/json"},
+            )
+        except Exception as exc:
+            # ví dụ --url thiếu scheme: phải báo lỗi chứ không được ném ra ngoài
+            self.log(f"URL không hợp lệ cho {method} {path}: {exc!r}")
+            return 0, None
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
                 raw = resp.read()
                 parsed = json.loads(raw) if raw else None
                 self.replay({"t": time.time(), "method": method, "path": path,
@@ -70,15 +114,22 @@ class HttpTransport(Transport):
             return 0, None
 
     def _call_with_retry(self, method: str, path: str, body=None,
-                         accept=(200,)) -> Tuple[int, Optional[dict]]:
-        status, payload = self._call(method, path, body)
+                         accept=(200,),
+                         deadline: Optional[float] = None) -> Tuple[int, Optional[dict]]:
+        """Thử lại có giãn cách, nhưng không bao giờ vượt hạn của ngày."""
+        status, payload = self._call(method, path, body, deadline=deadline)
         if status in accept:
             return status, payload
         for delay in RETRY_BACKOFF:
             if status in (400, 404, 409, 422):
                 break
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= delay:
+                    self.log(f"ngừng thử lại {method} {path}: hết hạn của ngày")
+                    break
             time.sleep(delay)
-            status, payload = self._call(method, path, body)
+            status, payload = self._call(method, path, body, deadline=deadline)
             if status in accept:
                 return status, payload
         return status, payload
@@ -89,15 +140,23 @@ class HttpTransport(Transport):
         while True:
             status, payload = self._call("GET", "/setup")
             if status == 200 and payload:
-                self.config = MatchConfig.from_json(payload)
+                try:
+                    self.config = MatchConfig.from_json(payload, warn=self.log)
+                except ProtocolError as exc:
+                    # trường lạ không được giết bot: server có thể sửa ở lần sau
+                    self.log(f"setup không đọc được ({exc}); hỏi lại")
+                    time.sleep(self.poll_seconds)
+                    continue
                 self.log(f"setup: {self.config.width}x{self.config.height}, "
                          f"{self.config.n_agents} agent, {self.config.n_days} ngày, "
                          f"{len(self.config.spots)} spot, {len(self.config.brands)} chuỗi")
                 return self.config
+            if status in (401, 403):
+                raise ProtocolError(f"server từ chối token (HTTP {status}) — kiểm tra --match và --token")
             self.log(f"chờ setup (HTTP {status})")
             time.sleep(self.poll_seconds)
 
-    def send_assignment(self, kinds: Sequence[int]) -> Ack:
+    def send_assignment(self, kinds: Sequence[int], deadline: Optional[float] = None) -> Ack:
         """Gửi mảng loại xe. Thử các kiểu bọc JSON khác nếu server từ chối kiểu mặc định."""
         self.kinds = list(kinds)
         bodies = [list(kinds), {"types": list(kinds)}, {"kinds": list(kinds)},
@@ -106,32 +165,81 @@ class HttpTransport(Transport):
             bodies.insert(0, self.body_style("assignment", list(kinds)))
         last = None
         for body in bodies:
-            status, payload = self._call_with_retry("POST", "/assignment", body)
+            status, payload = self._call_with_retry("POST", "/assignment", body, deadline=deadline)
             if status == 200:
                 self.assignment_body = body
                 return Ack(ok=True, raw=payload)
             last = (status, payload)
-            if status in (401, 403, 404, 425, 0):
+            if status in (401, 403, 404, 425, 429, 0):
+                # không phải lỗi định dạng: đổi kiểu bọc cũng vô ích
+                break
+            if deadline is not None and time.monotonic() >= deadline:
                 break
         self.log(f"gửi vai trò thất bại (HTTP {last[0]}): {last[1]}")
         return Ack(ok=False, reason=str(last[0]), raw=last[1] if isinstance(last[1], dict) else None)
 
+    def parse_state(self, payload: dict, kinds: Optional[Sequence[int]]) -> DayState:
+        """Đọc /state với bối cảnh từ setup (bề rộng map, dung tích bình)."""
+        return DayState.from_json(
+            payload, kinds,
+            width=self.config.width if self.config else None,
+            fuel_limits=self.config.fuel_limits if self.config else None,
+        )
+
+    def looks_finished(self, result: Optional[dict], status: int) -> bool:
+        """Chỉ coi là hết trận khi server nói vậy.
+
+        Trước đây bất kỳ payload nào từ /result cũng kết thúc trận, nên một lỗi
+        503 thoáng qua làm bot bỏ cuộc giữa chừng mà vẫn in bảng điểm như thường.
+        """
+        if not isinstance(result, dict):
+            return False
+        if result.get("finished") is True:
+            return True
+        # 409/410 là mã kết thúc tường minh; các mã khác chỉ là sự cố
+        return status in TERMINAL_STATUSES
+
     def wait_day_state(self, kinds: Optional[Sequence[int]] = None) -> DayState:
         kinds = kinds if kinds is not None else self.kinds
+        failures = 0
+        last_good = time.monotonic()
         while True:
             status, payload = self._call("GET", "/state")
             if status == 200 and payload is not None:
+                failures = 0
+                last_good = time.monotonic()
                 day = int(payload.get("day", 0))
                 if day != self.last_day:
+                    try:
+                        state = self.parse_state(payload, kinds)
+                    except ProtocolError as exc:
+                        self.log(f"trạng thái ngày không đọc được ({exc}); hỏi lại")
+                        time.sleep(self.poll_seconds)
+                        continue
                     self.last_day = day
-                    return DayState.from_json(payload, kinds)
-            elif status not in (200, 425, 429, 0):
-                result = self.get_result()
-                if result is not None:
-                    raise MatchEnded(result)
-            time.sleep(self.poll_seconds)
+                    return state
+                time.sleep(self.poll_seconds)
+                continue
 
-    def send_actions(self, day: int, plan: List[List[int]]) -> Ack:
+            failures += 1
+            terminal = status in TERMINAL_STATUSES
+            if terminal or failures % RESULT_PROBE_EVERY == 0:
+                result = self.get_result()
+                if self.looks_finished(result, status):
+                    raise MatchEnded(result)
+            silence = time.monotonic() - last_good
+            if silence > self.give_up_seconds:
+                # thà thoát có mã lỗi còn hơn quay vô hạn không ai biết
+                raise MatchEnded(
+                    f"mất liên lạc với server {silence:.0f}s (HTTP {status} lần cuối)")
+            if failures == 1 or failures % RESULT_PROBE_EVERY == 0:
+                self.log(f"/state lỗi (HTTP {status}), đã {failures} lần, "
+                         f"im lặng {silence:.0f}/{self.give_up_seconds:.0f}s")
+            # giãn dần để không đập server đang ốm
+            time.sleep(min(self.poll_seconds * (1 + failures // RESULT_PROBE_EVERY), 2.0))
+
+    def send_actions(self, day: int, plan: List[List[int]],
+                     deadline: Optional[float] = None) -> Ack:
         """Gửi kế hoạch ngày. Ghi nhớ kiểu bọc JSON mà server chấp nhận."""
         bodies = [plan]
         if self.actions_style == "wrapped":
@@ -140,12 +248,16 @@ class HttpTransport(Transport):
             bodies = [plan, {"day": day, "actions": plan}, {"actions": plan}]
         last = (0, None)
         for body in bodies:
-            status, payload = self._call_with_retry("POST", "/actions", body)
+            status, payload = self._call_with_retry("POST", "/actions", body, deadline=deadline)
             reason = None
             ok = status == 200
             if isinstance(payload, dict):
                 reason = payload.get("reason") or payload.get("error")
                 if payload.get("ok") is False:
+                    ok = False
+                elif ok and reason and str(reason).upper().startswith("E_"):
+                    # server có thể báo lỗi luật trong thân mà vẫn trả HTTP 200;
+                    # coi đó là thành công thì cả trận bị từ chối mà log vẫn xanh
                     ok = False
             if ok:
                 self.actions_style = "wrapped" if isinstance(body, dict) else "bare"
@@ -155,6 +267,8 @@ class HttpTransport(Transport):
             if reason and reason.startswith("E_") and reason != "E_BAD_FORMAT":
                 break
             if status in (401, 403, 409, 425, 0):
+                break
+            if deadline is not None and time.monotonic() >= deadline:
                 break
         status, payload = last
         reason = payload.get("reason") or payload.get("error") if isinstance(payload, dict) else None

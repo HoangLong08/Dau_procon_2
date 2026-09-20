@@ -13,7 +13,7 @@ from .solution import Weights
 
 DEFAULT_SEARCH_SECONDS = 3.0
 DEFAULT_NET_MARGIN = 1.5
-DEFAULT_ROLE_SECONDS = 20.0
+DEFAULT_ROLE_SECONDS = 3.0
 
 
 class MatchStrategist:
@@ -49,7 +49,24 @@ class MatchStrategist:
     # ---- trước trận ----
 
     def select_roles(self, budget_seconds: Optional[float] = None) -> List[int]:
+        """Chọn vai trò, nhưng không bao giờ lấn sang ngày thi đầu tiên.
+
+        `startsAt` của server là mốc trận mở. Chạy quá mốc đó thì ngày 0 (và có
+        khi ngày 1, 2) trôi qua trong lúc ta còn đang thử phương án — đã đo được
+        mất trọn 3 ngày với --role-seconds 20 trên map 16x16.
+        """
         budget = self.role_seconds if budget_seconds is None else budget_seconds
+        if self.config.starts_at:
+            cap = self.config.starts_at - time.time() - self.net_margin
+            why = "trận mở"
+        else:
+            # không có startsAt nghĩa là trận có thể ĐANG chạy: mỗi giây ở đây là
+            # một giây ăn trộm của ngày 0, nên chặn theo độ dài ngày 0
+            cap = self.config.seconds_of_day(0) - self.net_margin - self.search_seconds
+            why = "ngày 0 có thể đã mở"
+        if cap < budget:
+            self.log(f"{why}: rút ngân sách chọn vai trò {budget:.1f}s -> {max(0.0, cap):.1f}s")
+            budget = max(0.0, cap)
         kinds, options = select_roles(
             self.config, budget_seconds=budget, weights=self.weights, seed=self.seed, log=self.log
         )
@@ -93,10 +110,13 @@ class MatchStrategist:
         """Lập kế hoạch cho một ngày; gọi submit ngay khi có bài an toàn."""
         cfg = self.config
         self.reconcile(state)
-        agents = [
-            AgentState(self.kinds[i] if i < len(self.kinds) else a.kind, a.pos, a.fuel)
-            for i, a in enumerate(state.agents)
-        ]
+        # vai trò server báo mới là sự thật: lập kế hoạch theo vai trò ta MONG
+        # muốn trong khi server nghĩ khác sẽ làm mọi bài bị từ chối vì E_NO_FUEL
+        agents = [AgentState(a.kind, a.pos, a.fuel) for a in state.agents]
+        server_kinds = [a.kind for a in state.agents]
+        if server_kinds and server_kinds != self.kinds[:len(server_kinds)]:
+            self.log(f"lệch vai trò: ta {self.kinds}, server {server_kinds}; theo server")
+            self.kinds = list(server_kinds)
         status = dict(state.road_status)
         forecast_status = self.forecast.predict(status, self.status_yesterday)
         ctx = make_context(
@@ -124,6 +144,7 @@ class MatchStrategist:
     def record(self, state: DayState, decoded: Decoded, status: Dict[int, int]) -> None:
         """Ghi nhớ kết quả của bài đã gửi để dùng cho ngày sau."""
         result = decoded.result
+        new_brands = result.brands - self.visited_brands   # phải tính TRƯỚC khi gộp
         self.visited_brands |= result.brands
         self.daily_types_total += len(result.brands)
         self.servings_total += result.servings
@@ -131,15 +152,18 @@ class MatchStrategist:
         self.history.append({
             "day": state.day,
             "types": len(result.brands),
-            "new_types": len(result.brands - (self.visited_brands - result.brands)),
+            "new_types": len(new_brands),
             "servings": result.servings,
             "score": decoded.score,
             "truncated": decoded.truncated,
         })
+        # phải giữ HÔM QUA trước khi ghi đè bằng HÔM NAY, nếu không công thức
+        # hai ngày của luật biến thành "hôm nay tính hai lần"
+        yesterday = self.status_yesterday
         self.status_yesterday = status
         self.forecast_next = self.forecast.predict(
             status,
-            self.status_yesterday,
+            yesterday,
             own_stay_today=result.stay,
             opponents_parked=counts_from_positions(opponents, self.config.road_cells),
             steps_today=self.config.steps_of_day(state.day),

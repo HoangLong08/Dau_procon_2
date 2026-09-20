@@ -75,7 +75,7 @@ class SandboxTransport(Transport):
             if self._is_end(frame):
                 raise MatchEnded(frame)
 
-    def send_assignment(self, kinds: Sequence[int]) -> Ack:
+    def send_assignment(self, kinds: Sequence[int], deadline: Optional[float] = None) -> Ack:
         self.kinds = list(kinds)
         self._write(list(kinds))
         return Ack(ok=True)
@@ -94,6 +94,7 @@ class SandboxTransport(Transport):
             if self._is_setup(frame):
                 self.config = MatchConfig.from_json(frame)
 
-    def send_actions(self, day: int, plan: List[List[int]]) -> Ack:
+    def send_actions(self, day: int, plan: List[List[int]],
+                     deadline: Optional[float] = None) -> Ack:
         self._write(plan)
         return Ack(ok=True)

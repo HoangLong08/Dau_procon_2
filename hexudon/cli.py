@@ -28,7 +28,11 @@ def cmd_play(args) -> int:
     from .client.session import MatchSession, ReplayWriter
 
     replay = ReplayWriter(args.replay)
-    transport = HttpTransport(args.url, args.match, args.token, log=_log, replay=replay)
+    transport = HttpTransport(
+        args.url, args.match, args.token,
+        poll_seconds=args.poll_seconds, timeout=args.timeout,
+        give_up_seconds=args.give_up_seconds, log=_log, replay=replay,
+    )
     session = MatchSession(
         transport, search_seconds=args.search_seconds, net_margin=args.net_margin,
         role_seconds=args.role_seconds, seed=args.seed, log=_log, replay=replay,
@@ -169,7 +173,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     def common(p):
         p.add_argument("--search-seconds", type=float, default=3.0, help="ngân sách tìm kiếm mỗi ngày")
-        p.add_argument("--role-seconds", type=float, default=20.0, help="ngân sách chọn vai trò")
+        p.add_argument("--role-seconds", type=float, default=3.0,
+                       help="ngân sách chọn vai trò (tự rút lại theo startsAt)")
         p.add_argument("--net-margin", type=float, default=1.5, help="lề thời gian chừa cho mạng")
         p.add_argument("--seed", type=int, default=0)
 
@@ -178,6 +183,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--match", required=True)
     p.add_argument("--token", required=True)
     p.add_argument("--replay", default=None, help="đường dẫn ghi replay JSONL")
+    p.add_argument("--timeout", type=float, default=2.0,
+                   help="hạn cứng mỗi cuộc gọi HTTP, tính cả lúc server trả nhỏ giọt")
+    p.add_argument("--poll-seconds", type=float, default=0.25,
+                   help="nhịp hỏi /state; dưới 0.2 s server có thể trả HTTP 429")
+    p.add_argument("--give-up-seconds", type=float, default=120.0,
+                   help="mất liên lạc quá lâu thì thoát thay vì quay vô hạn")
     common(p)
     p.set_defaults(func=cmd_play)
 

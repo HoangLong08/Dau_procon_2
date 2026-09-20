@@ -5,6 +5,7 @@ import os
 import time
 from typing import Callable, List, Optional
 
+from .. import rules
 from ..model import DayState, MatchConfig
 from ..planner.decoder import Decoded
 from ..planner.solution import Weights
@@ -46,7 +47,7 @@ class MatchSession:
         transport: Transport,
         search_seconds: float = 3.0,
         net_margin: float = 1.5,
-        role_seconds: float = 20.0,
+        role_seconds: float = 3.0,
         seed: int = 0,
         weights: Optional[Weights] = None,
         log: Optional[Callable[[str], None]] = None,
@@ -78,7 +79,11 @@ class MatchSession:
         ack = self.transport.send_assignment(kinds)
         self.replay({"assignment": kinds, "ok": ack.ok})
         if not ack.ok:
-            self.log("server không nhận vai trò; tiếp tục với vai trò mặc định của server")
+            # mặc định của server là toàn xe tuần tra; lập kế hoạch như thể có xe
+            # tiếp nhiên liệu sẽ làm mọi bài bị từ chối vì E_NO_FUEL, cả trận
+            kinds = [rules.PATROL] * self.config.n_agents
+            self.strategist.kinds = list(kinds)
+            self.log("server không nhận vai trò; chuyển sang toàn xe tuần tra như server")
 
         while True:
             try:
@@ -86,7 +91,11 @@ class MatchSession:
             except MatchEnded as end:
                 self.log(f"trận kết thúc: {end.args[0] if end.args else ''}")
                 break
-            self.play_day(state)
+            try:
+                self.play_day(state)
+            except Exception as exc:
+                # mất một ngày còn hơn mất cả trận: ngày sau vẫn phải được chơi
+                self.log(f"ngày {state.day}: lỗi không lường trước {exc!r}; bỏ qua ngày này")
 
         result = self.transport.get_result()
         if self.strategist is not None:
@@ -115,16 +124,24 @@ class MatchSession:
             self.day_offset = -1
             self.log(f"server có vẻ đánh số ngày từ 1: chuyển sang dùng daySteps[{alt}]")
 
-    def play_day(self, state: DayState) -> Decoded:
+    def play_day(self, state: DayState) -> Optional[Decoded]:
         assert self.strategist is not None and self.config is not None
         started = time.monotonic()
         steps = self.steps_for(state.day)
         budget = self.strategist.budget_for(state)
         deadline = started + budget
+        #: hạn cứng của ngày theo đồng hồ đơn điệu; mọi lần gửi phải nằm trong đó
+        hard_deadline = None
+        if state.ends_at is not None:
+            hard_deadline = started + max(0.0, state.ends_at - time.time())
         sent = {"count": 0, "ok": False}
 
         def submit(plan: List[List[int]]) -> bool:
-            ack = self.transport.send_actions(state.day, plan)
+            if hard_deadline is not None and time.monotonic() >= hard_deadline:
+                # gửi muộn có thể rơi vào ngày sau và ghi đè bài tốt của ngày đó
+                self.log(f"ngày {state.day}: quá hạn, không gửi nữa")
+                return False
+            ack = self.transport.send_actions(state.day, plan, deadline=hard_deadline)
             sent["count"] += 1
             sent["ok"] = sent["ok"] or ack.ok
             self.replay({"day": state.day, "plan": plan, "ok": ack.ok, "reason": ack.reason})
@@ -143,14 +160,15 @@ class MatchSession:
                 # kênh chỉ nhận một dòng trả lời cho mỗi ngày: gửi đúng bài tốt nhất
                 submit(decoded.plan)
         except Exception as exc:
+            # planner hỏng thì ngày này chơi bài đứng yên, nhưng trận vẫn tiếp
             self.log(f"ngày {state.day}: planner lỗi {exc!r}")
-            if sent["count"] == 0:
-                submit(wait_plan(self.config.n_agents, steps))
-            raise
+            if not sent["ok"]:
+                submit(wait_plan(self.config.n_agents, self.steps_for(state.day)))
+            return None
 
         if sent["count"] == 0 or not sent["ok"]:
             self.log(f"ngày {state.day}: chưa có bài nào được nhận, gửi bài đứng yên")
-            submit(wait_plan(self.config.n_agents, steps))
+            submit(wait_plan(self.config.n_agents, self.steps_for(state.day)))
 
         if not sent["ok"] and self.day_offset != 0:
             # đã phát hiện lệch cách đánh số ngày: lập lại kế hoạch với số bước đúng
