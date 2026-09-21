@@ -70,7 +70,10 @@ class MatchStrategist:
             else:
                 # không có startsAt nghĩa là trận có thể ĐANG chạy: mỗi giây ở đây là
                 # một giây ăn trộm của ngày 0, nên chặn theo độ dài ngày 0
-                cap = self.config.seconds_of_day(0) - self.net_margin - (self.search_seconds or 0.0)
+                # search_seconds=None (tự động) vẫn phải trừ đúng ngân sách search sẽ dùng
+                search = (self.search_seconds if self.search_seconds is not None
+                         else self.config.seconds_of_day(0) - self.net_margin)
+                cap = self.config.seconds_of_day(0) - self.net_margin - search
                 why = "ngày 0 có thể đã mở"
             if cap < budget:
                 self.log(f"{why}: rút ngân sách chọn vai trò {budget:.1f}s -> {max(0.0, cap):.1f}s")

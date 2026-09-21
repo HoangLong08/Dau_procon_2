@@ -118,7 +118,7 @@ class MatchSession:
         else:
             budget = self.role_seconds
             if budget is None:
-                budget = window.limit - self.net_margin if window.limit else DEFAULT_ROLE_SECONDS
+                budget = window.limit - self.net_margin if window.limit is not None else DEFAULT_ROLE_SECONDS
             if window.deadline is not None:
                 left = window.deadline - time.time()
                 budget = min(budget, left - self.net_margin)

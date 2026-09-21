@@ -105,6 +105,12 @@ class SelectionWindowTest(unittest.TestCase):
         self.assertGreater(budget, 1.0)
         self.assertAlmostEqual(transport.assignments[0][1] - started, 2.0, delta=0.3)
 
+    def test_a_zero_length_window_gives_a_zero_role_budget(self):
+        calls = self.patch_roles()
+        transport = ScriptedTransport(small_config(), SelectionWindow(open=True, deadline=None, limit=0.0))
+        self.session(transport, role_seconds=None, net_margin=0.5).run()
+        self.assertEqual(calls, [(0.0, False)])
+
     def test_a_legacy_transport_keeps_the_start_time_cap(self):
         calls = self.patch_roles()
         self.session(ScriptedTransport(small_config(), None), role_seconds=3.0).run()
@@ -129,6 +135,23 @@ class AutoBudgetTest(unittest.TestCase):
         self.assertLessEqual(strategist.budget_for(state), 0.5)
         state.ends_at = time.time() - 5
         self.assertEqual(strategist.budget_for(state), 0.0)
+
+    def test_the_legacy_day_zero_cap_counts_the_auto_search_budget(self):
+        config = small_config()
+        config.starts_at = 0.0          # server không báo giờ mở: nhánh chặn theo ngày 0
+        strategist = MatchStrategist(config, search_seconds=None, net_margin=0.5, role_seconds=3.0)
+        calls = []
+
+        def fake_select_roles(config, budget_seconds=None, weights=None, seed=0, log=None):
+            calls.append(budget_seconds)
+            return [rules.PATROL] * config.n_agents, []
+
+        with mock.patch("hexudon.planner.strategy.select_roles", fake_select_roles):
+            strategist.select_roles()
+
+        # ngày 0 dài 2s, chừa 0.5s mạng, rồi trừ tiếp ngân sách search tự động
+        # (2s - 0.5s = 1.5s) -> 2 - 0.5 - 1.5 = 0
+        self.assertEqual(calls, [0.0])
 
 
 if __name__ == "__main__":
