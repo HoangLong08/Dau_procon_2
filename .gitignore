@@ -1,6 +1,10 @@
+# Bí mật: token đội, cập nhật lại trước mỗi trận
+.env
+
 # Tài liệu nội bộ
 docs/
 *.pdf
+*.pptx
 TheLe.md
 CLAUDE.md
 AGENTS.md
