@@ -377,9 +377,15 @@ class WebTransport(Transport):
                    "replay_days": len((replay or {}).get("days") or [])}
         summary.update(extra or {})
         if self.config is not None and replay is not None:
-            report = check_replay(self.config, self.team_id, replay, self.accepted_plans)
-            self.log(report.summary())
-            summary["replay_check"] = report.to_json()
+            try:
+                report = check_replay(self.config, self.team_id, replay, self.accepted_plans)
+            except Exception as exc:
+                # đối chiếu chỉ để chẩn đoán: replay lạ không được làm mất kết quả trận
+                self.log(f"đối chiếu replay lỗi ({exc!r}); vẫn lưu kết quả")
+                summary["replay_check"] = {"error": repr(exc)}
+            else:
+                self.log(report.summary())
+                summary["replay_check"] = report.to_json()
         if summary_path:
             directory = os.path.dirname(summary_path)
             if directory:

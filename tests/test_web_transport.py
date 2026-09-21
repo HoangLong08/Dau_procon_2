@@ -1,5 +1,8 @@
 """WebTransport: 409 là chưa mở, hạn theo giây còn lại, practice gửi đúng một lần mỗi ngày."""
 
+import json
+import os
+import tempfile
 import time
 import unittest
 
@@ -192,6 +195,21 @@ class ProtocolTest(unittest.TestCase):
         self.assertFalse(ack.ok)
         self.assertEqual(ack.reason, "E_NO_FUEL")
         self.assertEqual(t.accepted_plans, {})
+
+    def test_a_malformed_replay_never_loses_the_saved_result(self):
+        broken = {"days": [{"day": 0, "steps": 5, "teams": [
+            {"team_id": "78", "kinds": [0, 0, 0], "frames": [{"step": 0, "agents": [{"fuel": 1}]}]}]}]}
+        api = ScriptedApi(result=[Response(200, {"ranking": ["78"], "detail": {"78": {"distinct_types": 2}}})],
+                          replay=[Response(200, broken)])
+        t = scripted_transport(api)
+        t.config = self.config
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "x-summary.json")
+            summary = t.finish(path)
+            with open(path, encoding="utf-8") as fh:
+                saved = json.load(fh)
+        self.assertIn("KeyError", summary["replay_check"]["error"])
+        self.assertEqual(saved["score"]["L"], 2)
 
 
 class EndToEndTest(unittest.TestCase):
