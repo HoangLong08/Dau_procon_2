@@ -23,9 +23,9 @@ class MatchStrategist:
         self,
         config: MatchConfig,
         weights: Optional[Weights] = None,
-        search_seconds: float = DEFAULT_SEARCH_SECONDS,
+        search_seconds: Optional[float] = DEFAULT_SEARCH_SECONDS,
         net_margin: float = DEFAULT_NET_MARGIN,
-        role_seconds: float = DEFAULT_ROLE_SECONDS,
+        role_seconds: Optional[float] = DEFAULT_ROLE_SECONDS,
         seed: int = 0,
         log: Optional[Callable[[str], None]] = None,
     ):
@@ -48,25 +48,33 @@ class MatchStrategist:
 
     # ---- trước trận ----
 
-    def select_roles(self, budget_seconds: Optional[float] = None) -> List[int]:
+    def select_roles(self, budget_seconds: Optional[float] = None,
+                     cap_by_start: bool = True) -> List[int]:
         """Chọn vai trò, nhưng không bao giờ lấn sang ngày thi đầu tiên.
 
         `startsAt` của server là mốc trận mở. Chạy quá mốc đó thì ngày 0 (và có
         khi ngày 1, 2) trôi qua trong lúc ta còn đang thử phương án — đã đo được
         mất trọn 3 ngày với --role-seconds 20 trên map 16x16.
+
+        `cap_by_start=False` khi kênh truyền đã tự tính hạn của cửa sổ chọn xe
+        (server web báo selection_deadline_in): khi đó startsAt không còn là mốc
+        đúng — với practice nó nằm ở quá khứ và từng làm ngân sách về 0.
         """
         budget = self.role_seconds if budget_seconds is None else budget_seconds
-        if self.config.starts_at:
-            cap = self.config.starts_at - time.time() - self.net_margin
-            why = "trận mở"
-        else:
-            # không có startsAt nghĩa là trận có thể ĐANG chạy: mỗi giây ở đây là
-            # một giây ăn trộm của ngày 0, nên chặn theo độ dài ngày 0
-            cap = self.config.seconds_of_day(0) - self.net_margin - self.search_seconds
-            why = "ngày 0 có thể đã mở"
-        if cap < budget:
-            self.log(f"{why}: rút ngân sách chọn vai trò {budget:.1f}s -> {max(0.0, cap):.1f}s")
-            budget = max(0.0, cap)
+        if budget is None:
+            budget = DEFAULT_ROLE_SECONDS
+        if cap_by_start:
+            if self.config.starts_at:
+                cap = self.config.starts_at - time.time() - self.net_margin
+                why = "trận mở"
+            else:
+                # không có startsAt nghĩa là trận có thể ĐANG chạy: mỗi giây ở đây là
+                # một giây ăn trộm của ngày 0, nên chặn theo độ dài ngày 0
+                cap = self.config.seconds_of_day(0) - self.net_margin - (self.search_seconds or 0.0)
+                why = "ngày 0 có thể đã mở"
+            if cap < budget:
+                self.log(f"{why}: rút ngân sách chọn vai trò {budget:.1f}s -> {max(0.0, cap):.1f}s")
+                budget = max(0.0, cap)
         kinds, options = select_roles(
             self.config, budget_seconds=budget, weights=self.weights, seed=self.seed, log=self.log
         )
@@ -83,12 +91,18 @@ class MatchStrategist:
     # ---- mỗi ngày ----
 
     def budget_for(self, state: DayState, now: Optional[float] = None) -> float:
-        """Ngân sách tìm kiếm, chừa lề cho mạng."""
+        """Ngân sách tìm kiếm, chừa lề cho mạng.
+
+        `search_seconds=None` là tự động: dùng độ dài ngày BTC cấu hình
+        (daySeconds) trừ lề, để practice tự nhịp cũng chạy đúng nhịp thi thật;
+        trận có giờ còn bị chặn theo hạn chót thật ngay bên dưới.
+        """
         budget = self.search_seconds
+        if budget is None:
+            budget = self.config.seconds_of_day(state.day) - self.net_margin
         if state.ends_at is not None:
-            remaining = state.ends_at - time.time() - self.net_margin
-            budget = min(budget, max(0.0, remaining))
-        return budget
+            budget = min(budget, state.ends_at - time.time() - self.net_margin)
+        return max(0.0, budget)
 
     def reconcile(self, state: DayState) -> None:
         """Đối chiếu trạng thái server với dự đoán; server luôn thắng."""

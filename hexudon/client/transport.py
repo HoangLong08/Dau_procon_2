@@ -1,5 +1,6 @@
 """Giao diện kênh truyền: session không cần biết là HTTP hay sandbox."""
 
+from dataclasses import dataclass
 from typing import List, Optional, Sequence
 
 from ..model import Ack, DayState, MatchConfig
@@ -7,6 +8,19 @@ from ..model import Ack, DayState, MatchConfig
 
 class MatchEnded(Exception):
     """Trận đã kết thúc."""
+
+
+@dataclass(frozen=True)
+class SelectionWindow:
+    """Cửa sổ chọn vai trò theo lời kênh truyền.
+
+    open=False: cửa sổ đã qua (vào muộn, khởi động lại giữa trận).
+    deadline: mốc time.time() đóng cửa sổ; None là không giới hạn (practice).
+    limit: độ dài cửa sổ BTC cấu hình (agent_selection_time_limit), nếu biết.
+    """
+    open: bool
+    deadline: Optional[float] = None
+    limit: Optional[float] = None
 
 
 class Transport:
@@ -28,6 +42,10 @@ class Transport:
                      deadline: Optional[float] = None) -> Ack:
         """`deadline` là mốc time.monotonic() không được vượt qua."""
         raise NotImplementedError
+
+    def selection_window(self) -> Optional[SelectionWindow]:
+        """None: kênh không biết cửa sổ (PTIT, sandbox) — session giữ cách chặn theo startsAt."""
+        return None
 
     def get_result(self) -> Optional[dict]:
         return None
