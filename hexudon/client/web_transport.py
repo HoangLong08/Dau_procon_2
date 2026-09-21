@@ -70,6 +70,12 @@ def _rejected(payload) -> bool:
     return payload.get("ok") is False or str(payload.get("reason", "")).upper().startswith("E_")
 
 
+def _accepted(resp: Response) -> bool:
+    """Được nhận: 2xx VÀ thân không báo lỗi luật."""
+    payload = resp.payload if isinstance(resp.payload, dict) else None
+    return 200 <= resp.status < 300 and not _rejected(payload)
+
+
 class WebTransport(Transport):
     """Một câu trên server web; mỗi tiến trình bot giữ đúng một đối tượng này."""
 
@@ -172,6 +178,21 @@ class WebTransport(Transport):
         if silence > self.give_up_seconds:
             raise MatchEnded(f"mất liên lạc với server {silence:.0f}s")
 
+    def _post(self, endpoint: str, fn: Callable[[str], Response],
+              deadline: Optional[float], max_attempts: int) -> Response:
+        """Một POST, thử lại lỗi tạm thời (mạng, 5xx) trong hạn; trả response cuối cùng."""
+        attempts = 0
+        while True:
+            resp = self._call(endpoint, fn, deadline=deadline)
+            if _accepted(resp):
+                return resp
+            attempts += 1
+            transient = resp.status == 0 or resp.status >= 500
+            room = deadline is None or time.monotonic() + RETRY_SECONDS < deadline
+            if not (transient and room and attempts < max_attempts):
+                return resp
+            self.sleep(RETRY_SECONDS)
+
     # ---- trước trận ----
 
     def get_setup(self) -> MatchConfig:
@@ -241,24 +262,16 @@ class WebTransport(Transport):
 
     def send_assignment(self, kinds: Sequence[int], deadline: Optional[float] = None) -> Ack:
         types = [int(k) for k in kinds]
-        attempts = 0
-        while True:
-            resp = self._call("agent-types",
-                              lambda gid: self.api.agent_types(gid, types, deadline=deadline),
-                              deadline=deadline)
-            payload = resp.payload if isinstance(resp.payload, dict) else None
-            if 200 <= resp.status < 300:
-                self.kinds = types
-                return Ack(ok=True, raw=payload)
-            attempts += 1
-            transient = resp.status == 0 or resp.status >= 500
-            room = deadline is None or time.monotonic() + RETRY_SECONDS < deadline
-            if transient and room and attempts < 10:
-                self.sleep(RETRY_SECONDS)
-                continue
-            reason = error_detail(resp.payload) or f"HTTP {resp.status}"
-            self.log(f"gửi vai trò thất bại (HTTP {resp.status}): {reason}")
-            return Ack(ok=False, reason=reason, raw=payload)
+        resp = self._post("agent-types",
+                          lambda gid: self.api.agent_types(gid, types, deadline=deadline),
+                          deadline, max_attempts=10)
+        payload = resp.payload if isinstance(resp.payload, dict) else None
+        if _accepted(resp):
+            self.kinds = types
+            return Ack(ok=True, raw=payload)
+        reason = error_detail(resp.payload) or f"HTTP {resp.status}"
+        self.log(f"gửi vai trò thất bại (HTTP {resp.status}): {reason}")
+        return Ack(ok=False, reason=reason, raw=payload)
 
     # ---- mỗi ngày ----
 
@@ -328,22 +341,14 @@ class WebTransport(Transport):
                      deadline: Optional[float] = None) -> Ack:
         endpoint = "practice/actions" if self.practice else "actions"
         post = self.api.practice_actions if self.practice else self.api.actions
-        attempts = 0
-        while True:
-            resp = self._call(endpoint, lambda gid: post(gid, day, plan, deadline=deadline),
-                              deadline=deadline)
-            payload = resp.payload if isinstance(resp.payload, dict) else None
-            if 200 <= resp.status < 300 and not _rejected(payload):
-                self.accepted_plans[day] = [list(seq) for seq in plan]
-                return Ack(ok=True, raw=payload)
-            attempts += 1
-            transient = resp.status == 0 or resp.status >= 500
-            room = deadline is None or time.monotonic() + RETRY_SECONDS < deadline
-            if transient and room and attempts < 5:
-                self.sleep(RETRY_SECONDS)
-                continue
-            reason = error_detail(resp.payload) or f"HTTP {resp.status}"
-            return Ack(ok=False, reason=reason, raw=payload)
+        resp = self._post(endpoint, lambda gid: post(gid, day, plan, deadline=deadline),
+                          deadline, max_attempts=5)
+        payload = resp.payload if isinstance(resp.payload, dict) else None
+        if _accepted(resp):
+            self.accepted_plans[day] = [list(seq) for seq in plan]
+            return Ack(ok=True, raw=payload)
+        reason = error_detail(resp.payload) or f"HTTP {resp.status}"
+        return Ack(ok=False, reason=reason, raw=payload)
 
     # ---- sau trận ----
 

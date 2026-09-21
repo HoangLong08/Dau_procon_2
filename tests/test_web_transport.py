@@ -177,6 +177,22 @@ class ProtocolTest(unittest.TestCase):
                          {"L": 3, "D": 9, "Q": 14, "rank": 2, "teams": 2, "days_submitted": 10})
         self.assertIsNone(score_of(result, 99))
 
+    def test_a_soft_rejected_assignment_is_not_treated_as_accepted(self):
+        api = ScriptedApi(agent_types=[Response(200, {"ok": False, "reason": "E_BAD_TYPES"})])
+        t = scripted_transport(api)
+        ack = t.send_assignment([0, 1, 0])
+        self.assertFalse(ack.ok)
+        self.assertEqual(ack.reason, "E_BAD_TYPES")
+        self.assertIsNone(t.kinds)
+
+    def test_a_soft_rejected_plan_is_not_recorded_as_accepted(self):
+        api = ScriptedApi(actions=[Response(200, {"ok": False, "reason": "E_NO_FUEL"})])
+        t = scripted_transport(api)
+        ack = t.send_actions(0, [[-5]])
+        self.assertFalse(ack.ok)
+        self.assertEqual(ack.reason, "E_NO_FUEL")
+        self.assertEqual(t.accepted_plans, {})
+
 
 class EndToEndTest(unittest.TestCase):
     def start(self, faults=None, clock=time.time):
