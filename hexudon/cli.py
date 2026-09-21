@@ -9,6 +9,7 @@ from typing import List, Optional
 
 from . import rules
 from .model import MatchConfig
+from .client.web_api import DEFAULT_URL
 
 
 def _log(msg: str) -> None:
@@ -167,6 +168,39 @@ def cmd_roles(args) -> int:
     return 0
 
 
+def cmd_games(args) -> int:
+    """Liệt kê trận và câu mà đội thấy trên server thi, kèm trạng thái hiện tại."""
+    from .client.net import JsonHttp
+    from .client.tokens import TokenError, pick_tokens
+    from .client.web_api import GameStatus, WebApi
+    from .client.web_games import ResolveError, describe_status, fetch_questions, format_table
+
+    try:
+        [tok] = pick_tokens(args.env, [args.token_env] if args.token_env else [], args.live)
+    except TokenError as exc:
+        _log(str(exc))
+        return 2
+    for warning in tok.warnings:
+        _log("CẢNH BÁO: " + warning)
+    http = JsonHttp(args.url, timeout=args.timeout, log=_log, secrets=lambda: (tok.value,))
+    api = WebApi(http, lambda: tok.value)
+    try:
+        refs = fetch_questions(api, log=_log)
+    except ResolveError as exc:
+        _log(str(exc))
+        return 1
+    statuses = {}
+    for ref in refs:
+        resp = api.state(ref.game_id)
+        if resp.status == 200 and isinstance(resp.payload, dict):
+            statuses[ref.game_id] = describe_status(GameStatus.from_json(resp.payload, tok.team_id))
+        else:
+            statuses[ref.game_id] = f"HTTP {resp.status}"
+    print(f"Đội {tok.describe()} — token {tok.var}")
+    print(format_table(refs, statuses))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="hexudon", description="Bot HEXUDON — Procon Việt Nam 2026")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -177,6 +211,13 @@ def build_parser() -> argparse.ArgumentParser:
                        help="ngân sách chọn vai trò (tự rút lại theo startsAt)")
         p.add_argument("--net-margin", type=float, default=1.5, help="lề thời gian chừa cho mạng")
         p.add_argument("--seed", type=int, default=0)
+
+    def web_common(p):
+        p.add_argument("--url", default=DEFAULT_URL, help="server thi (mặc định %(default)s)")
+        p.add_argument("--env", default=".env", help="file chứa token (mặc định .env)")
+        p.add_argument("--live", action="store_true", help="THI THẬT: dùng TOKEN trong .env")
+        p.add_argument("--timeout", type=float, default=5.0,
+                       help="hạn cứng mỗi cuộc gọi HTTP, tính cả lúc server trả nhỏ giọt")
 
     p = sub.add_parser("play", help="thi đấu qua HTTP")
     p.add_argument("--url", required=True, help="ví dụ http://10.0.0.5:8099")
@@ -229,6 +270,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--map", required=True)
     common(p)
     p.set_defaults(func=cmd_roles)
+
+    p = sub.add_parser("games", help="liệt kê trận và câu trên server thi")
+    web_common(p)
+    p.add_argument("--token-env", default=None, help="tên biến token trong .env (mặc định TEST_DAU_02)")
+    p.set_defaults(func=cmd_games)
 
     return parser
 
