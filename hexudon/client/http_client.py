@@ -1,17 +1,15 @@
 """Kênh HTTP cho server kiểu PTIT.
 
 Trình tự: GET /setup -> POST /assignment -> lặp GET /state + POST /actions -> GET /result.
-Chỉ dùng thư viện chuẩn. Poll tối thiểu 200 ms để tránh HTTP 429.
+Chỉ dùng thư viện chuẩn. Poll tối thiểu 200 ms để tránh HTTP 429. Tầng HTTP (chặn
+cứng đồng hồ, SSL, User-Agent) nằm ở net.JsonHttp, dùng chung với kênh web.
 """
 
-import json
-import threading
 import time
-import urllib.error
-import urllib.request
 from typing import Callable, List, Optional, Sequence, Tuple
 
 from ..model import Ack, DayState, MatchConfig, ProtocolError
+from .net import JsonHttp
 from .transport import MatchEnded, Transport
 
 POLL_SECONDS = 0.25
@@ -40,6 +38,8 @@ class HttpTransport(Transport):
         self.give_up_seconds = give_up_seconds
         self.log = log or (lambda msg: None)
         self.replay = replay or (lambda entry: None)
+        self.http = JsonHttp(self.api, timeout=timeout, log=self.log, replay=self.replay,
+                             secrets=lambda: (self.token,))
         self.last_day = -1
         self.config: Optional[MatchConfig] = None
         self.kinds: Optional[List[int]] = None
@@ -51,67 +51,11 @@ class HttpTransport(Transport):
 
     def _call(self, method: str, path: str, body=None,
               deadline: Optional[float] = None) -> Tuple[int, Optional[dict]]:
-        """Gọi server với chặn cứng theo đồng hồ treo tường.
-
-        `timeout` của socket chỉ áp cho MỖI LẦN ĐỌC: một server nhả body từng
-        byte kéo được một request dài vô hạn mà không hề timeout (đo được 58 s
-        với timeout 2 s). Nên cuộc gọi chạy trong luồng riêng và bị bỏ rơi khi
-        hết giờ — thà mất một request còn hơn mất cả ngày.
-        """
-        budget = self.timeout
-        if deadline is not None:
-            budget = min(budget, deadline - time.monotonic())
-        if budget <= 0:
-            self.log(f"bỏ qua {method} {path}: đã quá hạn của ngày")
-            return 0, None
-
-        done: List[Tuple[int, Optional[dict]]] = []
-        worker = threading.Thread(
-            target=lambda: done.append(self._call_blocking(method, path, body, budget)),
-            daemon=True,
-        )
-        worker.start()
-        worker.join(budget)
-        if not done:
-            self.log(f"lỗi mạng {method} {path}: quá {budget:.1f}s, bỏ cuộc gọi")
-            self.replay({"t": time.time(), "method": method, "path": path,
-                         "status": 0, "error": f"wall-clock timeout {budget:.1f}s"})
-            return 0, None
-        return done[0]
-
-    def _call_blocking(self, method: str, path: str, body, timeout: float) -> Tuple[int, Optional[dict]]:
-        data = json.dumps(body).encode() if body is not None else None
-        try:
-            req = urllib.request.Request(
-                self.api + path, data=data, method=method,
-                headers={"Authorization": "Bearer " + self.token,
-                         "Content-Type": "application/json"},
-            )
-        except Exception as exc:
-            # ví dụ --url thiếu scheme: phải báo lỗi chứ không được ném ra ngoài
-            self.log(f"URL không hợp lệ cho {method} {path}: {exc!r}")
-            return 0, None
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                raw = resp.read()
-                parsed = json.loads(raw) if raw else None
-                self.replay({"t": time.time(), "method": method, "path": path,
-                             "status": resp.status, "response": parsed})
-                return resp.status, parsed
-        except urllib.error.HTTPError as exc:
-            raw = exc.read()
-            try:
-                parsed = json.loads(raw) if raw else None
-            except Exception:
-                parsed = {"raw": raw.decode("utf-8", "replace")[:500]}
-            self.replay({"t": time.time(), "method": method, "path": path,
-                         "status": exc.code, "response": parsed})
-            return exc.code, parsed
-        except Exception as exc:
-            self.log(f"lỗi mạng {method} {path}: {exc!r}")
-            self.replay({"t": time.time(), "method": method, "path": path,
-                         "status": 0, "error": repr(exc)})
-            return 0, None
+        """Gọi server với chặn cứng theo đồng hồ treo tường (xem JsonHttp.call)."""
+        resp = self.http.call(method, path, body=body,
+                              headers={"Authorization": "Bearer " + self.token},
+                              deadline=deadline)
+        return resp.status, resp.payload
 
     def _call_with_retry(self, method: str, path: str, body=None,
                          accept=(200,),
