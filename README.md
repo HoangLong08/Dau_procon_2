@@ -7,14 +7,49 @@ Python thuần, **không cài gì thêm** — chỉ thư viện chuẩn. Yêu c�
 
 ```bash
 git clone <repo> && cd procon-2026
-python -m unittest discover -s tests     # 60 test, phải xanh toàn bộ
+python -m unittest discover -s tests     # 156 test, phải xanh toàn bộ
 ```
 
 ---
 
 ## 1. Cách chạy
 
-### Thi đấu thật (HTTP)
+### Thi đấu trên server của BTC (hexudon.hairbui76.id.vn)
+
+Server thi của Procon Việt Nam 2026 là `https://hexudon.hairbui76.id.vn`. Token lấy trên
+website (icon 🔑), dán vào file `.env` ở gốc repo (file này không bao giờ được commit):
+
+```
+TOKEN=<token thi thật>
+TEST_DAU_01=<token test>
+TEST_DAU_02=<token test>
+```
+
+`TOKEN` chỉ dùng được khi có `--live`; không chỉ định gì thì bot dùng `TEST_DAU_02`.
+Token sống 48 giờ — lấy token mới trước mỗi buổi thi.
+
+```bash
+python -m hexudon games --live                            # trận, câu, ID, trạng thái
+python -m hexudon web --live --match <ID|tên> --follow    # thi thật: bắt mọi câu của trận
+python -m hexudon web --live --game <ID câu>              # một câu, khi manager API lỗi
+```
+
+Luyện tập (không cần `--live`):
+
+```bash
+python -m hexudon web --match "Practice Match" --question Q01     # trọn một câu practice
+python -m hexudon web --match "Mock Contest" --follow \
+       --token-env TEST_DAU_01 --token-env TEST_DAU_02            # thi thử hai đội
+python -m hexudon web-bench --match "Practice Match" --jobs 3     # loạt practice, so điểm
+python -m hexudon serve --web                                     # server giả, không cần mạng
+```
+
+Mỗi lần chơi ghi vào `replays/`: replay JSON Lines, file `-summary.json` (điểm, hạng, kết
+quả đối chiếu simulator) và `-replay.json` (replay của server). Practice được reset sau
+khi đã lưu kết quả, để đội khác không đọc được lộ trình qua `/practice/peer`; thêm
+`--keep` nếu muốn xem lại trên website.
+
+### Thi đấu trên server kiểu PTIT (HTTP)
 
 Ban tổ chức cấp URL, mã trận và token:
 
@@ -82,6 +117,10 @@ python -m hexudon roles --map data/sample_maps/sample_32.json
 
 | Lệnh | Dùng khi nào |
 |---|---|
+| `games` | liệt kê trận/câu trên server thi, kèm ID và trạng thái |
+| `web` | chơi trên server thi: một câu, nhiều đội (`--token-env` lặp lại), hoặc cả trận (`--follow`) |
+| `web-bench` | chạy loạt câu practice trên server thi, so điểm với đội khác |
+| `serve --web` | server giả nói giao thức của server thi, để tập dượt |
 | `play` | thi đấu thật qua HTTP |
 | `sandbox` | thi đấu khi ban tổ chức chấm qua stdin/stdout |
 | `serve` | dựng server luyện tập tại chỗ |
@@ -209,13 +248,38 @@ Trận luyện tập 16×16 với `greedy` và `sample`: ta (12, 52, 69) so vớ
 
 ## 5. Ngày thi
 
-Chạy một lần trước trận để chắc chắn máy và mạng đều ổn:
+### Trước giờ thi
+
+1. Nếu định đổi mật khẩu trên website thì đổi **trước**, rồi mới lấy token (icon 🔑).
+2. Dán token vào `TOKEN=` trong `.env`.
+3. `python -m unittest discover -s tests` — phải xanh toàn bộ.
+4. `python -m hexudon games --live` — thấy trận thi, ID trận và các câu.
+
+### Trong giờ thi
 
 ```bash
-python -m unittest discover -s tests            # phải xanh toàn bộ
-python -m hexudon serve --size 16 --teams 1 &   # server luyện tập tại chỗ
-python -m hexudon play --url http://127.0.0.1:8099 --match m-local --token tok-0 \
-                       --search-seconds 3.0
+python -m hexudon web --live --match <ID hoặc tên trận BTC công bố> --follow
+```
+
+Bot tự chờ cửa sổ chọn xe, chọn vai trò, chơi từng ngày và bắt mọi câu của trận kể cả
+câu chạy gối đầu. Ctrl-C **một lần** chỉ làm bot thôi bắt câu mới, các câu đang chơi vẫn
+chơi nốt; Ctrl-C lần hai mới dừng hết. Nếu manager API lỗi, chạy từng câu bằng
+`python -m hexudon web --live --game <ID câu>`.
+
+Trong lúc bot chạy: **đừng chọn loại xe hay nộp bài trên website** cho câu bot đang chơi
+(bài hợp lệ cuối cùng được dùng, hai bên sẽ ghi đè nhau), và đừng mở nhiều tab cùng một
+trận (chung giới hạn tần suất của server).
+
+Bot tự xử lý: server chưa mở (409), bản đồ còn giấu, poll quá nhanh (429), mất mạng,
+token hết hạn giữa trận (bot chờ bạn dán token mới vào `.env` rồi tự chơi tiếp),
+vào muộn hoặc khởi động lại giữa trận (bỏ qua bước chọn xe, chơi các ngày còn lại).
+
+### Server kiểu PTIT (dự phòng)
+
+```bash
+python -m unittest discover -s tests
+python -m hexudon serve --size 16 --teams 1 &
+python -m hexudon play --url http://127.0.0.1:8099 --match m-local --token tok-0 --search-seconds 3.0
 ```
 
 Vào trận thật chỉ đổi `--url`, `--match`, `--token`, và nhớ `--replay`.
