@@ -20,6 +20,7 @@ from typing import Callable, Dict, List, Optional, Sequence
 from ..model import Ack, DayState, MatchConfig, ProtocolError
 from ..simulator import wait_plan
 from .net import Response
+from .replay_check import check as check_replay
 from .transport import MatchEnded, SelectionWindow, Transport
 from .web_api import FINISHED, IN_PROGRESS, SELECTING, GameStatus, WebApi, error_detail
 from .web_games import PRACTICE, GameRef
@@ -375,6 +376,10 @@ class WebTransport(Transport):
                    "accepted_days": sorted(self.accepted_plans),
                    "replay_days": len((replay or {}).get("days") or [])}
         summary.update(extra or {})
+        if self.config is not None and replay is not None:
+            report = check_replay(self.config, self.team_id, replay, self.accepted_plans)
+            self.log(report.summary())
+            summary["replay_check"] = report.to_json()
         if summary_path:
             directory = os.path.dirname(summary_path)
             if directory:
