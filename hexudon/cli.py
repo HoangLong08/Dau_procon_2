@@ -120,6 +120,8 @@ def cmd_bench(args) -> int:
 
 def cmd_serve(args) -> int:
     """Server luyện tập tại chỗ: đội tự nối bot vào như server thi đấu thật."""
+    if args.web:
+        return cmd_serve_web(args)
     import time as _time
 
     from .offline.bots import BOT_TYPES
@@ -207,18 +209,102 @@ def cmd_games(args) -> int:
 
 
 def cmd_web(args) -> int:
-    """Chơi trên server thi hexudon.hairbui76.id.vn."""
+    """Chơi trên server thi hexudon.hairbui76.id.vn: một câu, nhiều đội, hoặc cả trận."""
+    from .client import web_runner
     from .client.tokens import TokenError, pick_tokens
-    from .client.web_runner import play_one
 
     try:
-        [tok] = pick_tokens(args.env, [args.token_env] if args.token_env else [], args.live)
+        tokens = pick_tokens(args.env, args.token_env, args.live)
+    except TokenError as exc:
+        _log(str(exc))
+        return 2
+    for tok in tokens:
+        for warning in tok.warnings:
+            _log("CẢNH BÁO: " + warning)
+    if args.follow:
+        return web_runner.follow(args, tokens, log=_log)
+    if len(tokens) > 1:
+        return web_runner.play_many(args, tokens, log=_log)
+    return web_runner.play_one(args, tokens[0], log=_log)
+
+
+def cmd_web_bench(args) -> int:
+    """Chạy loạt câu practice trên server thi và so điểm với các đội khác."""
+    from .client import web_runner
+    from .client.tokens import TokenError, pick_tokens
+
+    try:
+        [tok] = pick_tokens(args.env, [args.token_env] if args.token_env else [], live=False)
     except TokenError as exc:
         _log(str(exc))
         return 2
     for warning in tok.warnings:
         _log("CẢNH BÁO: " + warning)
-    return play_one(args, tok, log=_log)
+    return web_runner.bench(args, tok, log=_log)
+
+
+def cmd_serve_web(args) -> int:
+    """Server giả nói giao thức web: tập dượt ngày thi trên máy, không cần mạng."""
+    import os
+    import threading
+
+    from .offline.web_server import Faults, WebWorld, serve_web
+
+    config = _load_config(args.map) if args.map else None
+    if config is None:
+        from .offline.mapgen import generate
+        config = generate(seed=args.seed, size=args.size)
+    if args.day_seconds:
+        config.day_seconds = [args.day_seconds] * config.n_days
+        config.__post_init__()
+    faults_on = {f.strip() for f in (args.faults or "").split(",") if f.strip()}
+    faults = Faults(rate_limit_every=7 if "429" in faults_on else 0,
+                    error_every=11 if "5xx" in faults_on else 0,
+                    trickle_seconds=0.02 if "trickle" in faults_on else 0.0)
+    world = WebWorld([(77, "DAU 1"), (78, "DAU 2")], faults=faults)
+    for i in range(args.questions):
+        world.add_question(f"Q{i + 1:02d}", config, 1, "Local Contest",
+                           selection_seconds=args.selection_seconds,
+                           pre_window=args.pre_window + i * args.stagger,
+                           auto_reset=args.auto_reset or None)
+    for i in range(2):
+        world.add_question(f"Q{i + 1:02d}", config, 2, "Local Practice", practice=True,
+                           selection_seconds=args.selection_seconds)
+    env_path = os.path.join("experiments", "local.env")
+
+    def write_env() -> dict:
+        tokens = {team_id: world.issue_token(team_id) for team_id in (77, 78)}
+        os.makedirs("experiments", exist_ok=True)
+        with open(env_path, "w", encoding="utf-8") as fh:
+            fh.write(f"TOKEN={tokens[77]}\nTEST_DAU_01={tokens[77]}\nTEST_DAU_02={tokens[78]}\n")
+        return tokens
+
+    first_tokens = write_env()
+    httpd, _, url = serve_web(world, host=args.host, port=args.port)
+    print(f"server giả (giao thức web): {url} — token ở {env_path}")
+    print(f"map {config.width}x{config.height} | {config.n_agents} xe | {config.n_days} ngày "
+          f"| {config.seconds_of_day(0):.0f}s mỗi ngày | trận 1 contest ({args.questions} câu), trận 2 practice")
+    print(f"  python -m hexudon games --url {url} --env {env_path}")
+    print(f"  python -m hexudon web --url {url} --env {env_path} --match 1 --follow "
+          f"--token-env TEST_DAU_01 --token-env TEST_DAU_02")
+    print(f"  python -m hexudon web-bench --url {url} --env {env_path} --match 2")
+    sys.stdout.flush()      # ghi ra file thì stdout bị đệm; lệnh mẫu phải hiện ngay
+    if "401" in faults_on:
+        def expire_later():
+            time.sleep(args.revoke_after)
+            for token in first_tokens.values():
+                world.revoke(token)
+            write_env()
+            _log(f"đã thu hồi token cũ và ghi token mới vào {env_path}: bot phải tự đọc lại và chơi tiếp")
+        threading.Thread(target=expire_later, daemon=True).start()
+    try:
+        while True:
+            time.sleep(1.0)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        httpd.shutdown()
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -295,6 +381,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--teams", type=int, default=1, help="số đội nối từ ngoài vào")
     p.add_argument("--bots", default="greedy,sample", help="đối thủ nội bộ")
     p.add_argument("--day-seconds", type=float, default=0, help="ghi đè hạn phản hồi mỗi ngày")
+    p.add_argument("--web", action="store_true", help="nói giao thức của server thi hexudon.hairbui76.id.vn")
+    p.add_argument("--questions", type=int, default=2, help="--web: số câu contest")
+    p.add_argument("--pre-window", type=float, default=20.0, help="--web: số giây trước khi cửa sổ chọn xe mở")
+    p.add_argument("--stagger", type=float, default=45.0, help="--web: các câu contest mở cách nhau ngần này giây")
+    p.add_argument("--selection-seconds", type=float, default=30.0, help="--web: độ dài cửa sổ chọn xe")
+    p.add_argument("--auto-reset", type=float, default=0.0,
+                   help="--web: câu contest tự chạy lại sau ngần này giây (0 = không)")
+    p.add_argument("--faults", default="", help="--web: bật lỗi, ví dụ 429,5xx,401,trickle")
+    p.add_argument("--revoke-after", type=float, default=60.0,
+                   help="--web --faults 401: thu hồi token sau ngần này giây")
     common(p)
     p.set_defaults(func=cmd_serve)
 
@@ -311,7 +407,10 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("web", help="chơi trên server thi hexudon.hairbui76.id.vn")
     web_common(p)
     web_timing(p)
-    p.add_argument("--token-env", default=None, help="tên biến token trong .env (mặc định TEST_DAU_02)")
+    p.add_argument("--token-env", action="append", default=[],
+                   help="tên biến token trong .env (mặc định TEST_DAU_02); lặp lại để chạy nhiều đội")
+    p.add_argument("--follow", action="store_true",
+                   help="theo dõi cả trận: mỗi câu mở ra là có một bot cho mỗi đội")
     p.add_argument("--game", default=None, help="ID câu: chơi thẳng, không cần danh sách trận")
     p.add_argument("--practice", action="store_true", help="dùng cùng --game khi đó là câu practice")
     p.add_argument("--match", default=None, help="ID trận (số) hoặc tên trận")
@@ -321,6 +420,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--summary", default=None, help=argparse.SUPPRESS)
     p.add_argument("--label", default=None, help=argparse.SUPPRESS)
     p.set_defaults(func=cmd_web)
+
+    p = sub.add_parser("web-bench", help="chạy loạt câu practice trên server thi, so điểm với đội khác")
+    p.add_argument("--url", default=DEFAULT_URL)
+    p.add_argument("--env", default=".env")
+    p.add_argument("--timeout", type=float, default=5.0)
+    p.add_argument("--token-env", default=None, help="tên biến token trong .env (mặc định TEST_DAU_02)")
+    p.add_argument("--match", required=True, help="ID hoặc tên trận practice")
+    p.add_argument("--questions", default="all", help="all hoặc danh sách như Q01,Q03")
+    p.add_argument("--jobs", type=int, default=1, help="số câu chạy song song (nên ≤ số lõi CPU − 1)")
+    p.add_argument("--keep", action="store_true", help="không reset practice sau khi chơi")
+    p.add_argument("--out", default=None, help="file JSON báo cáo (mặc định experiments/web-bench-<giờ>.json)")
+    web_timing(p)
+    p.set_defaults(func=cmd_web_bench, live=False)
 
     return parser
 
