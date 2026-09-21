@@ -9,6 +9,10 @@ import tempfile
 import unittest
 
 from hexudon.cli import main
+from hexudon.client.net import JsonHttp
+from hexudon.client.web_api import WebApi
+from hexudon.client.web_games import ResolveError, resolve
+from hexudon.client.web_runner import pick_one
 from hexudon.offline.mapgen import generate
 from hexudon.offline.web_server import WebWorld, serve_web
 
@@ -88,6 +92,40 @@ class WebCliTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("Q01", text)
         self.assertIn("Q02", text)
+
+
+class PickOneTest(unittest.TestCase):
+    """--match không kèm --question: chỉ chơi khi trận còn đúng một câu contest chưa xong."""
+
+    def setUp(self):
+        self.clock = {"now": 1_000_000.0}
+        self.world = WebWorld([(77, "DAU 1"), (78, "DAU 2")], clock=lambda: self.clock["now"])
+        self.httpd, _, self.url = serve_web(self.world)
+        self.addCleanup(self.httpd.server_close)
+        self.addCleanup(self.httpd.shutdown)
+        token = self.world.issue_token(78)
+        self.api = WebApi(JsonHttp(self.url), lambda: token)
+
+    def test_the_only_unfinished_contest_question_is_picked(self):
+        config = small_config()
+        self.world.add_question("Q01", config, 14, "Mock Contest", selection_seconds=1)
+        waiting = self.world.add_question("Q02", config, 14, "Mock Contest", selection_seconds=1,
+                                          pre_window=1000)
+        self.clock["now"] += 100          # Q01 đã chơi xong, Q02 còn chờ mở cửa sổ chọn xe
+        refs = resolve(self.api, match="14")
+        self.assertEqual(pick_one(self.api, refs, 78).game_id, waiting)
+
+    def test_several_unfinished_contest_questions_stop_with_the_list(self):
+        config = small_config()
+        self.world.add_question("Q01", config, 14, "Mock Contest", selection_seconds=1, pre_window=500)
+        self.world.add_question("Q02", config, 14, "Mock Contest", selection_seconds=1, pre_window=1000)
+        refs = resolve(self.api, match="14")
+        with self.assertRaises(ResolveError) as caught:
+            pick_one(self.api, refs, 78)
+        message = str(caught.exception)
+        self.assertIn("Q01", message)
+        self.assertIn("Q02", message)
+        self.assertIn("chờ mở cửa sổ chọn xe", message)
 
 
 if __name__ == "__main__":

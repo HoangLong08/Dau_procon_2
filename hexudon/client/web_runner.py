@@ -12,7 +12,7 @@ from .net import JsonHttp
 from .session import MatchSession, ReplayWriter
 from .tokens import TeamToken
 from .web_api import FINISHED, GameStatus, WebApi
-from .web_games import CONTEST, PRACTICE, GameRef, ResolveError, format_table, resolve
+from .web_games import CONTEST, PRACTICE, GameRef, ResolveError, describe_status, format_table, resolve
 from .web_transport import WebTransport
 
 Log = Callable[[str], None]
@@ -55,7 +55,7 @@ def pick_one(api: WebApi, refs: List[GameRef], team_id) -> GameRef:
         resp = api.state(ref.game_id)
         if resp.status == 200 and isinstance(resp.payload, dict):
             st = GameStatus.from_json(resp.payload, team_id)
-            statuses[ref.game_id] = st.status
+            statuses[ref.game_id] = describe_status(st)
             if st.status != FINISHED:
                 open_refs.append(ref)
     if len(open_refs) == 1:
