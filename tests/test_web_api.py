@@ -22,9 +22,9 @@ class RecordingHttp:
     def __init__(self):
         self.calls = []
 
-    def call(self, method, path, params=None, body=None, headers=None, deadline=None):
+    def call(self, method, path, params=None, body=None, headers=None, deadline=None, timeout=None):
         self.calls.append({"method": method, "path": path, "params": params, "body": body,
-                           "headers": headers or {}, "deadline": deadline})
+                           "headers": headers or {}, "deadline": deadline, "timeout": timeout})
         return Response(200, {})
 
 
@@ -107,6 +107,13 @@ class RequestShapeTest(unittest.TestCase):
             ("POST", "/api/game/practice/actions", {"game_id": "q1:78", "day": 0, "actions": [[-5]]}),
             ("POST", "/api/game/practice/reset", {"game_id": "q1:78"}),
         ])
+
+    def test_post_match_reads_can_ask_for_a_longer_timeout(self):
+        self.api.result("q1", timeout=30.0)
+        self.api.replay("q1", timeout=30.0)
+        self.api.practice_score("q1:78", timeout=30.0)
+        self.api.state("q1")
+        self.assertEqual([c["timeout"] for c in self.http.calls], [30.0, 30.0, 30.0, None])
 
     def test_the_token_is_read_fresh_on_every_call(self):
         token = {"value": "cu"}

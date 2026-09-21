@@ -121,7 +121,8 @@ class MatchSession:
                 budget = window.limit - self.net_margin if window.limit is not None else DEFAULT_ROLE_SECONDS
             if window.deadline is not None:
                 left = window.deadline - time.time()
-                budget = min(budget, left - self.net_margin)
+                # chừa đủ giờ để vai trò tới được server: lỡ cửa sổ là toàn xe tuần tra cả câu
+                budget = min(budget, left - max(self.net_margin, window.reserve))
                 send_deadline = time.monotonic() + max(0.0, left)
             kinds = self.strategist.select_roles(budget_seconds=max(0.0, budget), cap_by_start=False)
         self.log(f"chọn vai trò xong trong {time.monotonic() - t0:.1f}s")

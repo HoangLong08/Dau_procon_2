@@ -6,6 +6,7 @@ import os
 import ssl
 import tempfile
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -37,6 +38,8 @@ class EchoServer:
                 ua = self.headers.get("User-Agent", "")
                 if ua.startswith("Python-urllib"):
                     return self._reply(403, b"error code: 1010", "text/plain")
+                if self.path.startswith("/slow"):
+                    time.sleep(0.5)
                 code = 500 if self.path.startswith("/boom") else 200
                 body = json.dumps({"ua": ua, "path": self.path}).encode()
                 self._reply(code, body, "application/json")
@@ -121,6 +124,12 @@ class JsonHttpTest(unittest.TestCase):
         self.assertNotIn(secret, json.dumps(entries))
         self.assertNotIn(secret, " ".join(logs))
         self.assertEqual(http.scrub(f"lỗi {secret} ở đây"), "lỗi <token> ở đây")
+
+    def test_a_per_call_timeout_overrides_the_default_but_not_the_deadline(self):
+        http = JsonHttp(self.server.url, timeout=0.2)
+        self.assertEqual(http.call("GET", "/slow").status, 0)
+        self.assertEqual(http.call("GET", "/slow", timeout=2.0).status, 200)
+        self.assertEqual(http.call("GET", "/slow", timeout=2.0, deadline=time.monotonic() + 0.2).status, 0)
 
     def test_unreachable_server_is_status_zero_not_an_exception(self):
         resp = JsonHttp("http://127.0.0.1:1", timeout=0.5).call("GET", "/x")

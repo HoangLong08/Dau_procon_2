@@ -128,16 +128,16 @@ class JsonHttp:
 
     def call(self, method: str, path: str, params: Optional[dict] = None, body=None,
              headers: Optional[Dict[str, str]] = None,
-             deadline: Optional[float] = None) -> Response:
+             deadline: Optional[float] = None, timeout: Optional[float] = None) -> Response:
         """Một lời gọi, không bao giờ sống quá `timeout` hay quá `deadline`.
 
         `timeout` của socket chỉ áp cho MỖI LẦN ĐỌC: một server nhả body từng
         byte kéo được một request dài vô hạn mà không hề timeout (đo được 58 s
         với timeout 2 s). Nên lời gọi chạy trong luồng riêng và bị bỏ rơi khi
         hết giờ — thà mất một request còn hơn mất cả ngày. `deadline` là mốc
-        time.monotonic().
+        time.monotonic(); `timeout` riêng của lời gọi thay cho timeout chung.
         """
-        budget = self.timeout
+        budget = self.timeout if timeout is None else timeout
         if deadline is not None:
             budget = min(budget, deadline - time.monotonic())
         if budget <= 0:

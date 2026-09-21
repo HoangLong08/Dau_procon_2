@@ -29,9 +29,13 @@ from .web_games import PRACTICE, GameRef
 WAKE_BEFORE_WINDOW = 15.0
 #: mỗi giấc chờ tối đa ngần này, để vẫn thấy BTC reset hay dời giờ
 MAX_NAP = 30.0
-#: nhịp đọc lại .env khi token bị từ chối
+#: nhịp gửi lại request và đọc lại .env khi token bị từ chối
 TOKEN_RETRY_SECONDS = 5.0
 RETRY_SECONDS = 0.3
+#: giờ dành riêng cho POST vai trò trước khi cửa sổ đóng: một cuộc gọi 5 s cộng lề thử lại
+SELECTION_SEND_RESERVE = 6.0
+#: sau trận không còn hạn nào: /result và /replay được chờ lâu hơn hạn mỗi cuộc gọi
+POST_MATCH_TIMEOUT = 30.0
 
 
 def score_of(result: Optional[dict], team_id: Optional[int]) -> Optional[dict]:
@@ -125,8 +129,9 @@ class WebTransport(Transport):
 
     def _call(self, endpoint: str, fn: Callable[[str], Response],
               deadline: Optional[float] = None) -> Response:
-        """Gọi một endpoint với game_id đúng kiểu; tự lo 401 (chờ token mới) và 429."""
+        """Gọi một endpoint với game_id đúng kiểu; tự lo 401/403 (gửi lại, đọc lại .env) và 429."""
         backoff = 1.0
+        waited = 0.0          # số giây đã ngủ vì token bị từ chối, trong riêng lời gọi này
         while True:
             gid = self._gid(endpoint)
             self._sent_at = self.clock()
@@ -138,7 +143,16 @@ class WebTransport(Transport):
             if _cloudflare(resp):
                 raise MatchEnded("Cloudflare chặn chữ ký của bot (403, error code 1010)")
             if resp.status in (401, 403):
-                self._wait_for_new_token(resp.status)
+                # có khi chỉ thoáng qua: gửi lại đúng request này, có token mới trong .env thì dùng luôn
+                if not waited:
+                    self.log(f"server từ chối token (HTTP {resp.status}) — lấy token mới trên website "
+                             f"(icon 🔑) rồi cập nhật {self.token_var} trong .env; bot đang chờ và tự đọc lại")
+                if waited >= self.give_up_seconds:
+                    raise MatchEnded(f"token vẫn bị từ chối sau {self.give_up_seconds:.0f}s thử lại")
+                self.sleep(TOKEN_RETRY_SECONDS)
+                waited += TOKEN_RETRY_SECONDS
+                if self.token_reload():
+                    self.log("đã đọc được token mới, chơi tiếp")
                 continue
             if resp.status == 429:
                 wait = _retry_after(resp)
@@ -149,18 +163,6 @@ class WebTransport(Transport):
                 backoff = min(backoff * 2, 5.0)
                 continue
             return resp
-
-    def _wait_for_new_token(self, status: int) -> None:
-        self.log(f"server từ chối token (HTTP {status}) — lấy token mới trên website (icon 🔑) "
-                 f"rồi cập nhật {self.token_var} trong .env; bot đang chờ và tự đọc lại")
-        waited = 0.0
-        while waited < self.give_up_seconds:
-            self.sleep(TOKEN_RETRY_SECONDS)
-            waited += TOKEN_RETRY_SECONDS
-            if self.token_reload():
-                self.log("đã đọc được token mới, chơi tiếp")
-                return
-        raise MatchEnded(f"token bị từ chối và không có token mới sau {self.give_up_seconds:.0f}s")
 
     def _status(self) -> Optional[GameStatus]:
         resp = self._call("state", self.api.state)
@@ -208,7 +210,8 @@ class WebTransport(Transport):
                 continue
             last_good = self.clock()
             if st.status == FINISHED:
-                raise MatchEnded(self.get_result() or "câu đã kết thúc")
+                self.get_result()          # kết quả nằm ở self.result; thông điệp chỉ là một câu ngắn
+                raise MatchEnded("câu đã kết thúc")
             opens_in = st.selection_opens_in or 0.0
             if st.status == SELECTING and not self.practice and opens_in > 0:
                 if opens_in > WAKE_BEFORE_WINDOW:
@@ -247,16 +250,19 @@ class WebTransport(Transport):
         return config
 
     def _window_for(self, st: GameStatus) -> SelectionWindow:
-        limit = st.selection_limit or self.selection_limit
+        # 0 là cửa sổ dài 0 giây, không phải "không biết": không được rơi về giá trị trong /config
+        limit = st.selection_limit if st.selection_limit is not None else self.selection_limit
         if st.status != SELECTING:
             return SelectionWindow(open=False, limit=limit)
         if self.practice:
             return SelectionWindow(open=True, deadline=None, limit=limit)
         if st.selection_deadline_in is not None:
-            return SelectionWindow(open=True, deadline=st.read_at + st.selection_deadline_in, limit=limit)
-        # server không báo hạn: chặn theo giờ mở ngày 0, không bao giờ để không giới hạn
-        starts_at = self.config.starts_at if self.config is not None and self.config.starts_at else self.clock()
-        return SelectionWindow(open=True, deadline=starts_at, limit=limit)
+            deadline = st.read_at + st.selection_deadline_in
+        else:
+            # server không báo hạn: chặn theo giờ mở ngày 0, không bao giờ để không giới hạn
+            deadline = self.config.starts_at if self.config is not None and self.config.starts_at \
+                else self.clock()
+        return SelectionWindow(open=True, deadline=deadline, limit=limit, reserve=SELECTION_SEND_RESERVE)
 
     def selection_window(self) -> Optional[SelectionWindow]:
         return self.window
@@ -290,7 +296,8 @@ class WebTransport(Transport):
             failures = 0
             last_good = self.clock()
             if st.status == FINISHED:
-                raise MatchEnded(self.get_result() or "câu đã kết thúc")
+                self.get_result()          # kết quả nằm ở self.result; thông điệp chỉ là một câu ngắn
+                raise MatchEnded("câu đã kết thúc")
             if st.status == IN_PROGRESS and st.day > self.last_day:
                 state = self._fetch_day(st, kinds)
                 if state is not None:
@@ -298,7 +305,11 @@ class WebTransport(Transport):
                     return state
             elif self._practice_stuck(st):
                 continue
-            self.sleep(self.poll_seconds)
+            nap = self.poll_seconds
+            if st.status == SELECTING and st.selection_deadline_in is not None:
+                # vai trò đã gửi, cửa sổ còn mở: ngủ tới sát giờ mở ngày 0 thay vì hỏi mỗi nhịp
+                nap = min(max(self.poll_seconds, st.selection_deadline_in - 1.0), MAX_NAP)
+            self.sleep(nap)
 
     def _practice_stuck(self, st: GameStatus) -> bool:
         """Practice chỉ sang ngày khi có bài: ngày chưa có bài nào được nhận thì gửi bài đứng yên."""
@@ -353,23 +364,34 @@ class WebTransport(Transport):
 
     # ---- sau trận ----
 
-    def get_result(self) -> Optional[dict]:
+    def _read(self, endpoint: str, fn: Callable[[str], Response], attempts: int) -> Response:
+        """Một lời đọc; lỗi tạm thời (mạng, 5xx) được thử lại tới `attempts` lần, cách nhau 1 s."""
+        resp = self._call(endpoint, fn)
+        for _ in range(attempts - 1):
+            if resp.status != 0 and resp.status < 500:
+                break
+            self.sleep(1.0)
+            resp = self._call(endpoint, fn)
+        return resp
+
+    def get_result(self, timeout: Optional[float] = None, attempts: int = 1) -> Optional[dict]:
         if self.practice:
-            resp = self._call("practice/score", self.api.practice_score)
+            resp = self._read("practice/score",
+                              lambda gid: self.api.practice_score(gid, timeout=timeout), attempts)
         else:
-            resp = self._call("result", self.api.result)
+            resp = self._read("result", lambda gid: self.api.result(gid, timeout=timeout), attempts)
         if resp.status == 200 and isinstance(resp.payload, dict):
             self.result = resp.payload
         return self.result
 
-    def fetch_replay(self) -> Optional[dict]:
-        resp = self._call("replay", self.api.replay)
+    def fetch_replay(self, timeout: Optional[float] = None, attempts: int = 1) -> Optional[dict]:
+        resp = self._read("replay", lambda gid: self.api.replay(gid, timeout=timeout), attempts)
         return resp.payload if resp.status == 200 and isinstance(resp.payload, dict) else None
 
     def finish(self, summary_path: Optional[str] = None, extra: Optional[dict] = None) -> dict:
         """Sau trận: lấy kết quả và replay, lưu tổng kết; practice thì reset (trừ khi keep)."""
-        result = self.get_result()
-        replay = self.fetch_replay()
+        result = self.get_result(timeout=POST_MATCH_TIMEOUT, attempts=3)
+        replay = self.fetch_replay(timeout=POST_MATCH_TIMEOUT, attempts=3)
         summary = {"game_id": self.ref.game_id, "label": self.ref.label(), "mode": self.ref.mode,
                    "team_id": self.team_id, "finished_at": time.time(),
                    "score": score_of(result, self.team_id), "result": result,

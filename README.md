@@ -7,7 +7,7 @@ Python thuần, **không cài gì thêm** — chỉ thư viện chuẩn. Yêu c�
 
 ```bash
 git clone <repo> && cd procon-2026
-python -m unittest discover -s tests     # 156 test, phải xanh toàn bộ
+python -m unittest discover -s tests     # 172 test, phải xanh toàn bộ
 ```
 
 ---
@@ -130,6 +130,22 @@ python -m hexudon roles --map data/sample_maps/sample_32.json
 
 ### Tham số thời gian (quan trọng nhất trong ngày thi)
 
+Lệnh `web` và `web-bench` (server thi hexudon.hairbui76.id.vn) — **để nguyên mặc định**:
+
+| Tham số | Mặc định | Ý nghĩa |
+|---|---|---|
+| `--search-seconds` | `auto` | ngân sách tìm kiếm mỗi ngày: hạn của ngày (contest) hoặc độ dài ngày BTC cấu hình (practice), trừ lề mạng |
+| `--role-seconds` | `auto` | ngân sách chọn vai trò: theo cửa sổ chọn xe server báo, đã chừa giờ để gửi vai trò tới nơi |
+| `--net-margin` | `2.0` | lề chừa cho mạng, trừ khỏi hạn của server |
+| `--timeout` | `5.0` | hạn cứng **mỗi cuộc gọi HTTP**; riêng `/result` và `/replay` sau trận được chờ 30 s mỗi lần, thử tối đa 3 lần |
+| `--poll-seconds` | `0.5` | nhịp hỏi `/state` |
+| `--give-up-seconds` | `120` | mất liên lạc, hoặc token bị từ chối, quá lâu thì thoát thay vì quay vô hạn |
+
+`auto` đọc độ dài ngày và cửa sổ chọn xe từ chính server, nên BTC đổi thông số thì bot
+đổi theo. Bình thường **đừng đặt tay** `--search-seconds` hay `--role-seconds` cho `web`.
+
+Lệnh `play` và `sandbox` (server kiểu PTIT):
+
 | Tham số | Mặc định | Ý nghĩa |
 |---|---|---|
 | `--search-seconds` | `3.0` | ngân sách tìm kiếm mỗi ngày |
@@ -140,8 +156,8 @@ python -m hexudon roles --map data/sample_maps/sample_32.json
 | `--give-up-seconds` | `120` | mất liên lạc quá lâu thì thoát thay vì quay vô hạn |
 | `--seed` | `0` | cùng seed + cùng đầu vào ⇒ cùng kế hoạch, để tái hiện khi gỡ lỗi |
 
-**Quy tắc đặt `--search-seconds`**: bằng hạn mỗi ngày của ban tổ chức trừ khoảng
-2 giây. Hạn 5 s → để mặc định 3.0. Hạn 60 s → đặt 58.
+**Quy tắc đặt `--search-seconds` cho `play`**: bằng hạn mỗi ngày của ban tổ chức trừ
+khoảng 2 giây. Hạn 5 s → để mặc định 3.0. Hạn 60 s → đặt 58.
 
 **Đừng tự tăng `--role-seconds`.** Nó tự rút lại theo `startsAt` của server, hoặc
 theo độ dài ngày 0 nếu server không báo giờ mở. Đây là bảo hiểm cho một lỗi đã đo
@@ -262,17 +278,27 @@ python -m hexudon web --live --match <ID hoặc tên trận BTC công bố> --fo
 ```
 
 Bot tự chờ cửa sổ chọn xe, chọn vai trò, chơi từng ngày và bắt mọi câu của trận kể cả
-câu chạy gối đầu. Ctrl-C **một lần** chỉ làm bot thôi bắt câu mới, các câu đang chơi vẫn
-chơi nốt; Ctrl-C lần hai mới dừng hết. Nếu manager API lỗi, chạy từng câu bằng
-`python -m hexudon web --live --game <ID câu>`.
+câu chạy gối đầu. Trận chưa được công bố thì bot hỏi lại mỗi 15 s cho tới khi thấy, nên
+chạy lệnh sớm trước giờ cũng được. Ctrl-C **một lần** chỉ làm bot thôi bắt câu mới, các
+câu đang chơi vẫn chơi nốt; Ctrl-C lần hai mới dừng hết. Nếu manager API lỗi, chạy từng
+câu bằng `python -m hexudon web --live --game <ID câu>`.
+
+Máy chạy bot (thi thử Mock Contest với hai token — 16 bot trên laptop 8 lõi — đã làm
+nhiều lần nộp bị timeout):
+
+- ngày thi chỉ một token: `--live`, không chạy thêm đội test nào trên cùng máy;
+- số lõi CPU ≥ số câu chạy cùng lúc: mỗi câu là một bot tìm kiếm dùng trọn một lõi;
+- không làm việc nặng khác trên laptop trong giờ thi;
+- `--follow` chỉ chạy trên **một** máy: hai máy cùng đội sẽ nộp đè bài của nhau.
 
 Trong lúc bot chạy: **đừng chọn loại xe hay nộp bài trên website** cho câu bot đang chơi
 (bài hợp lệ cuối cùng được dùng, hai bên sẽ ghi đè nhau), và đừng mở nhiều tab cùng một
 trận (chung giới hạn tần suất của server).
 
 Bot tự xử lý: server chưa mở (409), bản đồ còn giấu, poll quá nhanh (429), mất mạng,
-token hết hạn giữa trận (bot chờ bạn dán token mới vào `.env` rồi tự chơi tiếp),
-vào muộn hoặc khởi động lại giữa trận (bỏ qua bước chọn xe, chơi các ngày còn lại).
+token bị từ chối giữa trận (bot gửi lại mỗi 5 s và tự đọc lại `.env`: lỗi thoáng qua tự
+hết, token hết hạn thì dán token mới vào `.env` là bot chơi tiếp), vào muộn hoặc khởi
+động lại giữa trận (bỏ qua bước chọn xe, chơi các ngày còn lại).
 
 ### Server kiểu PTIT (dự phòng)
 

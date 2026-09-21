@@ -18,7 +18,15 @@ UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]
 
 
 class ResolveError(Exception):
-    """Không xác định được câu cần chơi; thông điệp in thẳng cho người dùng."""
+    """Không xác định được câu cần chơi; thông điệp in thẳng cho người dùng.
+
+    `retry`: chờ thêm có thể hết lỗi (manager API lỗi, trận chưa công bố); tên trùng
+    hay chế độ chưa hỗ trợ thì chờ bao lâu cũng vậy.
+    """
+
+    def __init__(self, message: str, retry: bool = False):
+        super().__init__(message)
+        self.retry = retry
 
 
 @dataclass(frozen=True)
@@ -47,7 +55,8 @@ def fetch_questions(api, log: Optional[Callable[[str], None]] = None) -> List[Ga
     resp = api.questions()
     if resp.status != 200 or not isinstance(resp.payload, dict):
         raise ResolveError(f"không lấy được danh sách câu (HTTP {resp.status}: "
-                           f"{error_detail(resp.payload)}); có thể chơi thẳng bằng --game <ID câu>")
+                           f"{error_detail(resp.payload)}); có thể chơi thẳng bằng --game <ID câu>",
+                           retry=True)
     rows = resp.payload.get("data") or []
     count = resp.payload.get("count")
     if log and isinstance(count, int) and count > len(rows):
@@ -104,7 +113,8 @@ def resolve(api, match=None, question=None, game=None, practice: bool = False,
     else:
         in_match = [r for r in refs if (r.match_name or "").casefold() == key.casefold()]
     if not in_match:
-        raise ResolveError(f"không có trận {match!r}. Các trận đội bạn thấy:\n" + format_table(refs))
+        raise ResolveError(f"không có trận {match!r}. Các trận đội bạn thấy:\n" + format_table(refs),
+                           retry=True)
     if len({r.match_id for r in in_match}) > 1:
         raise ResolveError(f"tên trận {match!r} trùng nhiều trận; dùng ID trận:\n" + format_table(in_match))
     if in_match[0].mode == COMPETITIVE_PRACTICE:

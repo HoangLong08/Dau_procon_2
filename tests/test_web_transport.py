@@ -11,7 +11,7 @@ from hexudon.client.session import MatchSession
 from hexudon.client.transport import MatchEnded, SelectionWindow
 from hexudon.client.web_api import WebApi
 from hexudon.client.web_games import CONTEST, PRACTICE, GameRef
-from hexudon.client.web_transport import WebTransport, score_of
+from hexudon.client.web_transport import POST_MATCH_TIMEOUT, SELECTION_SEND_RESERVE, WebTransport, score_of
 from hexudon.offline.mapgen import generate
 from hexudon.offline.web_server import Faults, WebWorld, serve_web
 
@@ -53,6 +53,7 @@ class ScriptedApi:
     def __init__(self, **scripts):
         self.scripts = {name: list(responses) for name, responses in scripts.items()}
         self.calls = []
+        self.keywords = []          # (endpoint, tham số từ khoá) của từng lời gọi
 
     def __getattr__(self, name):
         scripts = self.__dict__.get("scripts", {})
@@ -61,6 +62,7 @@ class ScriptedApi:
 
         def endpoint(game_id, *args, **kwargs):
             self.calls.append((name, game_id) + args)
+            self.keywords.append((name, kwargs))
             queue = scripts[name]
             return queue.pop(0) if len(queue) > 1 else queue[0]
         return endpoint
@@ -100,7 +102,8 @@ class ProtocolTest(unittest.TestCase):
         t = scripted_transport(api, clock=lambda: 100.0)
         self.assertEqual(t.get_setup().n_agents, 3)
         self.assertEqual(api.count("config"), 2)
-        self.assertEqual(t.selection_window(), SelectionWindow(open=True, deadline=120.0, limit=30.0))
+        self.assertEqual(t.selection_window(), SelectionWindow(open=True, deadline=120.0, limit=30.0,
+                                                               reserve=SELECTION_SEND_RESERVE))
 
     def test_waiting_for_the_window_sleeps_until_shortly_before_it_opens(self):
         naps = []
@@ -139,6 +142,46 @@ class ProtocolTest(unittest.TestCase):
         api = ScriptedApi(state=[Response(401, {"detail": "expired"})])
         with self.assertRaises(MatchEnded):
             scripted_transport(api, give_up_seconds=10.0).get_setup()
+
+    def test_a_passing_403_retries_the_same_token_instead_of_waiting_for_a_new_one(self):
+        logs = []
+        api = ScriptedApi(state=[Response(403, {"detail": "blip"}),
+                                 status("in_progress", 0, day_deadline_in=10.0)],
+                          config=[config_response(self.config)])
+        t = scripted_transport(api, token_reload=lambda: False, log=logs.append)
+        self.assertEqual(t.get_setup().n_agents, 3)
+        self.assertEqual(api.count("state"), 2, "cùng một request phải được gửi lại")
+        self.assertEqual(sum("từ chối token" in m for m in logs), 1)
+
+    def test_a_finished_question_ends_with_a_short_message_and_keeps_the_result(self):
+        result = {"ranking": ["78"], "detail": {"78": {"distinct_types": 5}}}
+        api = ScriptedApi(state=[status("finished", 10)], result=[Response(200, result)])
+        t = scripted_transport(api)
+        with self.assertRaises(MatchEnded) as caught:
+            t.get_setup()
+        self.assertEqual(str(caught.exception), "câu đã kết thúc")
+        with self.assertRaises(MatchEnded) as caught:
+            t.wait_day_state([0, 0, 0])
+        self.assertEqual(str(caught.exception), "câu đã kết thúc")
+        self.assertEqual(t.result, result)
+
+    def test_a_reported_zero_second_window_is_not_replaced_by_the_config_limit(self):
+        api = ScriptedApi(state=[status("selecting_agents", selection_deadline_in=20.0,
+                                        agent_selection_time_limit=0.0)],
+                          config=[config_response(self.config)])
+        t = scripted_transport(api, clock=lambda: 100.0)
+        t.get_setup()
+        self.assertEqual(t.selection_window().limit, 0.0)
+
+    def test_after_the_roles_are_sent_the_bot_naps_until_shortly_before_day_zero(self):
+        naps = []
+        api = ScriptedApi(state=[status("selecting_agents", selection_deadline_in=20.0),
+                                 status("in_progress", 0, day_deadline_in=10.0)],
+                          day=[day_response(self.config, 0)])
+        t = scripted_transport(api, sleep=naps.append)
+        t.config = self.config
+        self.assertEqual(t.wait_day_state([0, 0, 0]).day, 0)
+        self.assertEqual(naps[0], 19.0)
 
     def test_a_cloudflare_block_ends_with_a_clear_message(self):
         api = ScriptedApi(state=[Response(403, {"raw": "error code: 1010"})])
@@ -210,6 +253,19 @@ class ProtocolTest(unittest.TestCase):
                 saved = json.load(fh)
         self.assertIn("KeyError", summary["replay_check"]["error"])
         self.assertEqual(saved["score"]["L"], 2)
+
+    def test_post_match_reads_get_a_long_timeout_and_retry_a_network_error(self):
+        result = {"ranking": ["78"], "detail": {"78": {"distinct_types": 2}}}
+        replay = {"days": [{"day": 0, "steps": 5, "teams": []}]}
+        naps = []
+        api = ScriptedApi(result=[Response(0), Response(200, result)],
+                          replay=[Response(0), Response(200, replay)])
+        summary = scripted_transport(api, sleep=naps.append).finish()
+        self.assertGreater(summary["replay_days"], 0)
+        self.assertEqual(summary["score"]["L"], 2)
+        self.assertEqual(naps, [1.0, 1.0])
+        self.assertIn(("replay", {"timeout": POST_MATCH_TIMEOUT}), api.keywords)
+        self.assertIn(("result", {"timeout": POST_MATCH_TIMEOUT}), api.keywords)
 
 
 class EndToEndTest(unittest.TestCase):

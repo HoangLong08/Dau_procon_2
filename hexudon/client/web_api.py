@@ -77,10 +77,10 @@ class WebApi:
         self.token_provider = token_provider
 
     def _game(self, method: str, path: str, params: Optional[dict] = None, body=None,
-              deadline: Optional[float] = None) -> Response:
+              deadline: Optional[float] = None, timeout: Optional[float] = None) -> Response:
         return self.http.call(method, "/api/game" + path, params=params, body=body,
                               headers={"Authorization": "Bearer " + self.token_provider()},
-                              deadline=deadline)
+                              deadline=deadline, timeout=timeout)
 
     def _manager(self, path: str) -> Response:
         return self.http.call("GET", "/manager/api" + path, params={"limit": LIST_LIMIT},
@@ -97,17 +97,17 @@ class WebApi:
     def day(self, game_id: str) -> Response:
         return self._game("GET", "/day", {"game_id": game_id})
 
-    def replay(self, game_id: str) -> Response:
-        return self._game("GET", "/replay", {"game_id": game_id})
+    def replay(self, game_id: str, timeout: Optional[float] = None) -> Response:
+        return self._game("GET", "/replay", {"game_id": game_id}, timeout=timeout)
 
-    def result(self, game_id: str) -> Response:
-        return self._game("GET", "/result", {"game_id": game_id})
+    def result(self, game_id: str, timeout: Optional[float] = None) -> Response:
+        return self._game("GET", "/result", {"game_id": game_id}, timeout=timeout)
 
     def submitted_actions(self, game_id: str) -> Response:
         return self._game("GET", "/actions", {"game_id": game_id})
 
-    def practice_score(self, game_id: str) -> Response:
-        return self._game("GET", "/practice/score", {"game_id": game_id})
+    def practice_score(self, game_id: str, timeout: Optional[float] = None) -> Response:
+        return self._game("GET", "/practice/score", {"game_id": game_id}, timeout=timeout)
 
     def practice_peer(self, game_id: str) -> Response:
         return self._game("GET", "/practice/peer", {"game_id": game_id})

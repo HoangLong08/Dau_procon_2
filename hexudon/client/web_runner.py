@@ -17,7 +17,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 from .net import JsonHttp
 from .session import MatchSession, ReplayWriter
 from .tokens import TeamToken
-from .web_api import FINISHED, IN_PROGRESS, SELECTING, GameStatus, WebApi
+from .web_api import FINISHED, IN_PROGRESS, SELECTING, GameStatus, WebApi, error_detail
 from .web_games import CONTEST, PRACTICE, GameRef, ResolveError, describe_status, fetch_questions, format_table, resolve
 from .web_transport import WebTransport, score_of
 
@@ -124,6 +124,8 @@ def play_one(args, tok: TeamToken, log: Log) -> int:
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 #: con thoát lỗi liên tiếp ngần này lần thì thôi mở lại cho (câu, đội) đó
 MAX_CHILD_FAILURES = 3
+#: trận chưa hiện thì báo lại tối đa mỗi ngần này giây, để log không bị ngập
+WAIT_LOG_SECONDS = 60.0
 
 
 def _auto(value: Optional[float]) -> str:
@@ -277,55 +279,100 @@ def _ctrl_c(sup: Supervisor, log: Log):
             signal.signal(signal.SIGINT, previous)
 
 
+def question_status(api: WebApi, ref: GameRef, tokens: Sequence[TeamToken], log: Log,
+                    reported: set) -> Optional[GameStatus]:
+    """/state của một câu cho tiến trình cha; lỗi thì báo một lần, 401/403 thì đọc lại token."""
+    resp = api.state(ref.game_id)
+    if resp.status == 200 and isinstance(resp.payload, dict):
+        return GameStatus.from_json(resp.payload)
+    if (ref.game_id, resp.status) not in reported:
+        reported.add((ref.game_id, resp.status))
+        log(f"/state của {ref.label()} lỗi (HTTP {resp.status}): {error_detail(resp.payload)}")
+    if resp.status in (401, 403):
+        for tok in tokens:
+            tok.reload()
+    return None
+
+
+def wait_for_match(api: WebApi, match, tokens: Sequence[TeamToken], sup: Supervisor, log: Log,
+                   sleep: Callable[[float], None], every: float,
+                   stop_when: Optional[Callable[[Supervisor], bool]]) -> Optional[List[GameRef]]:
+    """Trận chưa công bố hoặc manager API lỗi: hỏi lại mỗi `every` giây tới khi có.
+
+    None nếu người dùng dừng, hoặc lỗi không tự hết (tên trùng, chế độ chưa hỗ trợ).
+    """
+    logged_at: Optional[float] = None
+    while True:
+        try:
+            return resolve(api, match=match, log=log)
+        except ResolveError as exc:
+            if not exc.retry:
+                log(str(exc))
+                return None
+            if logged_at is None or time.monotonic() - logged_at >= WAIT_LOG_SECONDS:
+                logged_at = time.monotonic()
+                log(f"{exc}\nhỏi lại mỗi {every:g}s cho tới khi thấy trận {match!r}; Ctrl-C để thôi")
+        if stop_when is not None and stop_when(sup):
+            sup.stopping = True
+        if sup.stopping:
+            return None
+        sleep(every)
+        for tok in tokens:           # manager API trả 401 thì token mới trong .env được dùng ngay
+            tok.reload()
+
+
 def follow(args, tokens: Sequence[TeamToken], log: Log, sleep: Callable[[float], None] = time.sleep,
-           status_every: float = 5.0, questions_every: float = 30.0,
+           status_every: float = 5.0, questions_every: float = 15.0,
            stop_when: Optional[Callable[[Supervisor], bool]] = None) -> int:
     """Theo dõi cả trận: mỗi câu mở ra là có một bot cho mỗi đội."""
-    if args.game:
+    if args.game or not args.match:
+        # lỗi cách gọi: chờ bao lâu cũng không tự hết, nên dừng ngay chứ không hỏi lại
         log("--follow cần --match (ID hoặc tên trận), không dùng cùng --game")
         return 2
     api = make_api(args.url, tokens[0], args.timeout, log)
-    try:
-        refs = resolve(api, match=args.match, log=log)
-    except ResolveError as exc:
-        log(str(exc))
-        return 1
-    if refs[0].mode != CONTEST:
-        log("--follow chỉ dùng cho trận contest; trận practice thì chạy web-bench")
-        return 2
-    match_id = refs[0].match_id
     sup = Supervisor(args, log)
-    log(f"theo dõi trận {match_id} «{refs[0].match_name}»: {len(refs)} câu, {len(tokens)} đội. "
-        "Ctrl-C một lần để thôi bắt câu mới.")
-    listed_at = time.monotonic()
+    reported: set = set()
     with _ctrl_c(sup, log):
         try:
+            refs = wait_for_match(api, args.match, tokens, sup, log, sleep, questions_every, stop_when)
+            if refs is None:
+                return 1
+            if refs[0].mode != CONTEST:
+                log("--follow chỉ dùng cho trận contest; trận practice thì chạy web-bench")
+                return 2
+            match_id = refs[0].match_id
+            log(f"theo dõi trận {match_id} «{refs[0].match_name}»: {len(refs)} câu, {len(tokens)} đội. "
+                "Ctrl-C một lần để thôi bắt câu mới.")
+            listed_at = time.monotonic()
             while True:
-                sup.reap()
-                if stop_when is not None and stop_when(sup):
-                    sup.stopping = True
-                if sup.stopping:
-                    if not sup.children:
-                        break
-                    sleep(0.5)
-                    continue
-                if time.monotonic() - listed_at >= questions_every:
-                    try:
-                        refs = [r for r in fetch_questions(api, log) if r.match_id == match_id] or refs
-                    except ResolveError as exc:
-                        log(f"không làm mới được danh sách câu ({exc}); giữ danh sách cũ")
-                    listed_at = time.monotonic()
-                for ref in refs:
-                    waiting = [tok for tok in tokens
-                               if not sup.running(ref, tok.var) and not sup.blocked(ref, tok.var)]
-                    if not waiting:
+                try:
+                    sup.reap()
+                    if stop_when is not None and stop_when(sup):
+                        sup.stopping = True
+                    if sup.stopping:
+                        if not sup.children:
+                            break
+                        sleep(0.5)
                         continue
-                    resp = api.state(ref.game_id)
-                    if resp.status != 200 or not isinstance(resp.payload, dict):
-                        continue
-                    if GameStatus.from_json(resp.payload).status in (SELECTING, IN_PROGRESS):
-                        for tok in waiting:
-                            sup.spawn(ref, tok.var)
+                    if time.monotonic() - listed_at >= questions_every:
+                        listed_at = time.monotonic()
+                        try:
+                            refs = [r for r in fetch_questions(api, log) if r.match_id == match_id] or refs
+                        except ResolveError as exc:
+                            log(f"không làm mới được danh sách câu ({exc}); giữ danh sách cũ")
+                    for ref in refs:
+                        waiting = [tok for tok in tokens
+                                   if not sup.running(ref, tok.var) and not sup.blocked(ref, tok.var)]
+                        if not waiting:
+                            continue
+                        st = question_status(api, ref, tokens, log, reported)
+                        if st is not None and st.status in (SELECTING, IN_PROGRESS):
+                            for tok in waiting:
+                                sup.spawn(ref, tok.var)
+                except Exception as exc:
+                    # cha chết thì các con chơi mù và không ai bắt câu mới: báo rồi theo dõi tiếp
+                    log(f"lỗi khi theo dõi trận ({exc!r}); bot đang chơi không bị ảnh hưởng, "
+                        f"thử lại sau {status_every:g}s")
                 sleep(status_every)
         except KeyboardInterrupt:
             log("dừng tất cả bot")

@@ -105,6 +105,16 @@ class SelectionWindowTest(unittest.TestCase):
         self.assertGreater(budget, 1.0)
         self.assertAlmostEqual(transport.assignments[0][1] - started, 2.0, delta=0.3)
 
+    def test_the_role_budget_leaves_the_transport_its_send_reserve(self):
+        # lề mạng 0,5 s không đủ cho một POST 5 s và một lần thử lại: kênh truyền đòi 6 s
+        calls = self.patch_roles()
+        window = SelectionWindow(open=True, deadline=time.time() + 8.0, limit=30.0, reserve=6.0)
+        self.session(ScriptedTransport(small_config(), window), role_seconds=10.0, net_margin=0.5).run()
+        budget, cap = calls[0]
+        self.assertFalse(cap)
+        self.assertLessEqual(budget, 2.0)
+        self.assertGreater(budget, 1.5)
+
     def test_a_zero_length_window_gives_a_zero_role_budget(self):
         calls = self.patch_roles()
         transport = ScriptedTransport(small_config(), SelectionWindow(open=True, deadline=None, limit=0.0))

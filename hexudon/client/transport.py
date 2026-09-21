@@ -17,10 +17,12 @@ class SelectionWindow:
     open=False: cửa sổ đã qua (vào muộn, khởi động lại giữa trận).
     deadline: mốc time.time() đóng cửa sổ; None là không giới hạn (practice).
     limit: độ dài cửa sổ BTC cấu hình (agent_selection_time_limit), nếu biết.
+    reserve: số giây kênh truyền cần để gửi vai trò tới nơi trước hạn.
     """
     open: bool
     deadline: Optional[float] = None
     limit: Optional[float] = None
+    reserve: float = 0.0
 
 
 class Transport:
