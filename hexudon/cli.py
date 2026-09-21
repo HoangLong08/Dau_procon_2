@@ -16,6 +16,11 @@ def _log(msg: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", file=sys.stderr, flush=True)
 
 
+def _seconds_or_auto(text: str) -> Optional[float]:
+    """'auto' (không phân biệt hoa thường) nghĩa là để server quyết định."""
+    return None if text.strip().lower() == "auto" else float(text)
+
+
 def _load_config(path: str) -> MatchConfig:
     with open(path, encoding="utf-8") as fh:
         obj = json.load(fh)
@@ -201,6 +206,21 @@ def cmd_games(args) -> int:
     return 0
 
 
+def cmd_web(args) -> int:
+    """Chơi trên server thi hexudon.hairbui76.id.vn."""
+    from .client.tokens import TokenError, pick_tokens
+    from .client.web_runner import play_one
+
+    try:
+        [tok] = pick_tokens(args.env, [args.token_env] if args.token_env else [], args.live)
+    except TokenError as exc:
+        _log(str(exc))
+        return 2
+    for warning in tok.warnings:
+        _log("CẢNH BÁO: " + warning)
+    return play_one(args, tok, log=_log)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="hexudon", description="Bot HEXUDON — Procon Việt Nam 2026")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -218,6 +238,18 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--live", action="store_true", help="THI THẬT: dùng TOKEN trong .env")
         p.add_argument("--timeout", type=float, default=5.0,
                        help="hạn cứng mỗi cuộc gọi HTTP, tính cả lúc server trả nhỏ giọt")
+
+    def web_timing(p):
+        p.add_argument("--search-seconds", type=_seconds_or_auto, default=None,
+                       help="ngân sách tìm kiếm mỗi ngày; mặc định auto = theo hạn và độ dài ngày của server")
+        p.add_argument("--role-seconds", type=_seconds_or_auto, default=None,
+                       help="ngân sách chọn vai trò; mặc định auto = theo cửa sổ chọn xe của server")
+        p.add_argument("--net-margin", type=float, default=2.0, help="lề thời gian chừa cho mạng")
+        p.add_argument("--poll-seconds", type=float, default=0.5, help="nhịp hỏi /state")
+        p.add_argument("--give-up-seconds", type=float, default=120.0,
+                       help="mất liên lạc quá lâu thì thoát thay vì quay vô hạn")
+        p.add_argument("--seed", type=int, default=0)
+        p.add_argument("--out-dir", default="replays", help="thư mục ghi replay và tổng kết")
 
     p = sub.add_parser("play", help="thi đấu qua HTTP")
     p.add_argument("--url", required=True, help="ví dụ http://10.0.0.5:8099")
@@ -275,6 +307,20 @@ def build_parser() -> argparse.ArgumentParser:
     web_common(p)
     p.add_argument("--token-env", default=None, help="tên biến token trong .env (mặc định TEST_DAU_02)")
     p.set_defaults(func=cmd_games)
+
+    p = sub.add_parser("web", help="chơi trên server thi hexudon.hairbui76.id.vn")
+    web_common(p)
+    web_timing(p)
+    p.add_argument("--token-env", default=None, help="tên biến token trong .env (mặc định TEST_DAU_02)")
+    p.add_argument("--game", default=None, help="ID câu: chơi thẳng, không cần danh sách trận")
+    p.add_argument("--practice", action="store_true", help="dùng cùng --game khi đó là câu practice")
+    p.add_argument("--match", default=None, help="ID trận (số) hoặc tên trận")
+    p.add_argument("--question", default=None, help="tên câu (Q01) hoặc ID câu")
+    p.add_argument("--keep", action="store_true",
+                   help="practice: không reset sau khi chơi, để xem trên website")
+    p.add_argument("--summary", default=None, help=argparse.SUPPRESS)
+    p.add_argument("--label", default=None, help=argparse.SUPPRESS)
+    p.set_defaults(func=cmd_web)
 
     return parser
 
