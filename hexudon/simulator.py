@@ -73,8 +73,14 @@ def run_day(
     plan: Sequence[Sequence[int]],
     stocks: Sequence[int],
     road_status: Optional[Dict[int, int]] = None,
+    trace: Optional[list] = None,
 ) -> DayResult:
-    """Chạy một ngày cho MỘT đội. Trả DayResult; ok=False kèm lỗi đầu tiên gặp phải."""
+    """Chạy một ngày cho MỘT đội. Trả DayResult; ok=False kèm lỗi đầu tiên gặp phải.
+
+    `trace`, nếu có, nhận (bước, vị trí, nhiên liệu) ở bước 0 và sau pha phản
+    ánh của mỗi bước 1..N — đúng các frame replay server gửi cho đội mình.
+    Không đổi kết quả.
+    """
     n = len(agents)
     err = _normalise_plan(plan, n)
     if err is not None:
@@ -96,6 +102,8 @@ def run_day(
     stocks = list(stocks)
     stay: Dict[int, int] = {}
     collections: List[Tuple[int, int, int]] = []
+    if trace is not None:
+        trace.append((0, list(pos), list(fuel)))
 
     def cell_step_cost(cell: int) -> int:
         terrain = cells[cell]
@@ -179,6 +187,8 @@ def run_day(
         for i in range(n):
             c = pos[i]
             stay[c] = stay.get(c, 0) + 1
+        if trace is not None:
+            trace.append((t, list(pos), list(fuel)))
         # dọn pending đã xong
         for i in range(n):
             if pending[i] is not None and pending[i][0] == t:
