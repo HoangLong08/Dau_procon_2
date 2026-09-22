@@ -3,6 +3,7 @@
 import argparse
 import json
 import random
+import signal
 import sys
 import time
 from typing import List, Optional
@@ -27,6 +28,13 @@ def _load_config(path: str) -> MatchConfig:
     if "problem" in obj:
         return MatchConfig.from_problem_json(obj)
     return MatchConfig.from_json(obj)
+
+
+def _trim_days(config: MatchConfig, days: int) -> None:
+    """Chỉ giữ `days` ngày đầu, để thử nhanh."""
+    config.day_steps = config.day_steps[:days] or config.day_steps
+    config.day_seconds = config.day_seconds[:days] or config.day_seconds
+    config.__post_init__()
 
 
 def cmd_play(args) -> int:
@@ -80,9 +88,7 @@ def cmd_sim(args) -> int:
     if args.players:
         config.players = args.players
     if args.days:
-        config.day_steps = config.day_steps[:args.days] or config.day_steps
-        config.day_seconds = config.day_seconds[:args.days] or config.day_seconds
-        config.__post_init__()
+        _trim_days(config, args.days)
 
     names = args.bots.split(",")
     bots = []
@@ -100,6 +106,34 @@ def cmd_sim(args) -> int:
         L, D, Q = rec.score()
         print(f"  {rank}. {rec.name:8s} L={L:3d} D={D:4d} Q={Q:4d}  "
               f"bài lỗi={rec.invalid_days} vai trò={rec.kinds}")
+    return 0
+
+
+def cmd_arena(args) -> int:
+    """Trận offline n bot, ghi sự kiện suy luận cho web trực quan hoá."""
+    from .offline.mapgen import load_or_generate
+    from .viz.arena import BotSpec, run_arena
+    from .viz.events import EventWriter
+
+    try:
+        specs = [BotSpec.parse(text) for text in (args.bot or ["search:1", "greedy", "sample"])]
+        config = load_or_generate(args.map, seed=args.seed)
+    except (ValueError, OSError) as exc:
+        _log(str(exc))
+        return 2
+    if args.days:
+        _trim_days(config, args.days)
+    writer = EventWriter(args.events)
+    try:
+        outcome = run_arena(config, specs, writer.for_bot, seed=args.seed, role_seconds=args.role_seconds)
+    except KeyboardInterrupt:
+        writer.write(None, "log", {"text": "dừng theo yêu cầu (Ctrl-C)", "level": "warn"})
+        return 130
+    finally:
+        writer.close()
+    for rank, rec in enumerate(outcome.ranking(), 1):
+        L, D, Q = rec.score()
+        _log(f"{rank}. {rec.name}: L={L} D={D} Q={Q}, bài lỗi {rec.invalid_days}")
     return 0
 
 
@@ -221,11 +255,18 @@ def cmd_web(args) -> int:
     for tok in tokens:
         for warning in tok.warnings:
             _log("CẢNH BÁO: " + warning)
+    if args.events and (args.live or args.follow or len(tokens) > 1):
+        _log("--events chỉ dùng khi chơi một câu với một token test, không dùng khi thi thật (--live)")
+        return 2
     if args.follow:
         return web_runner.follow(args, tokens, log=_log)
     if len(tokens) > 1:
         return web_runner.play_many(args, tokens, log=_log)
-    return web_runner.play_one(args, tokens[0], log=_log)
+    try:
+        return web_runner.play_one(args, tokens[0], log=_log)
+    except KeyboardInterrupt:
+        _log("dừng theo yêu cầu (Ctrl-C)")
+        return 130
 
 
 def cmd_web_bench(args) -> int:
@@ -279,8 +320,15 @@ def cmd_serve_web(args) -> int:
             fh.write(f"TOKEN={tokens[77]}\nTEST_DAU_01={tokens[77]}\nTEST_DAU_02={tokens[78]}\n")
         return tokens
 
+    try:
+        httpd, _, url = serve_web(world, host=args.host, port=args.port)
+    except OSError as exc:
+        # phải mở cổng TRƯỚC khi ghi token: ghi trước từng đè token của server giả
+        # đang chạy trên cổng này, làm bot của nó bị 401 giữa trận
+        _log(f"không mở được cổng {args.port} ({exc}); có server giả khác đang chạy? "
+             f"giữ nguyên {env_path}")
+        return 2
     first_tokens = write_env()
-    httpd, _, url = serve_web(world, host=args.host, port=args.port)
     print(f"server giả (giao thức web): {url} — token ở {env_path}")
     print(f"map {config.width}x{config.height} | {config.n_agents} xe | {config.n_days} ngày "
           f"| {config.seconds_of_day(0):.0f}s mỗi ngày | trận 1 contest ({args.questions} câu), trận 2 practice")
@@ -304,6 +352,43 @@ def cmd_serve_web(args) -> int:
         pass
     finally:
         httpd.shutdown()
+    return 0
+
+
+def _raise_keyboard_interrupt(signum, frame) -> None:
+    raise KeyboardInterrupt
+
+
+def _install_exit_signals() -> None:
+    """SIGTERM (kill mặc định) và SIGHUP (đóng terminal) cũng phải dừng web như Ctrl-C,
+    để nhánh `finally: app.shutdown()` chạy và bot web không bị bỏ mồ côi."""
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, _raise_keyboard_interrupt)
+
+
+def cmd_viz(args) -> int:
+    """Web trực quan hoá trên 127.0.0.1: tạo trận, xem bot suy luận, tua lại."""
+    import webbrowser
+
+    from .viz.server import VizApp, serve_viz
+
+    app = VizApp(log=_log)
+    try:
+        httpd, url = serve_viz(port=args.port, app=app)
+    except OSError as exc:
+        _log(f"không mở được cổng {args.port}: {exc}")
+        return 2
+    _install_exit_signals()
+    _log(f"web trực quan hoá: {url} — Ctrl-C hoặc đóng terminal để tắt; các bot web đang chạy sẽ dừng theo")
+    if args.open:
+        webbrowser.open(url)
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        app.shutdown()
+        httpd.server_close()
     return 0
 
 
@@ -365,6 +450,17 @@ def build_parser() -> argparse.ArgumentParser:
     common(p)
     p.set_defaults(func=cmd_sim)
 
+    p = sub.add_parser("arena", help="trận offline n bot, ghi sự kiện cho web trực quan hoá")
+    p.add_argument("--map", default="sample_16",
+                   help="sample_16 | sample_24 | sample_32 | random<cỡ> | đường dẫn JSON")
+    p.add_argument("--bot", action="append", default=[],
+                   help="loại[:giây], ví dụ search:3, greedy, sample, wait; lặp lại cho mỗi bot")
+    p.add_argument("--days", type=int, default=0, help="chỉ chơi N ngày đầu (0 = đủ)")
+    p.add_argument("--role-seconds", type=float, default=3.0, help="ngân sách chọn vai trò của bot search")
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--events", required=True, help="file JSONL ghi sự kiện")
+    p.set_defaults(func=cmd_arena)
+
     p = sub.add_parser("bench", help="benchmark nhiều map và seed")
     p.add_argument("--maps", default="sample_16,sample_24,sample_32,random16,random24")
     p.add_argument("--count", type=int, default=5, help="số seed")
@@ -401,14 +497,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("games", help="liệt kê trận và câu trên server thi")
     web_common(p)
-    p.add_argument("--token-env", default=None, help="tên biến token trong .env (mặc định TEST_DAU_02)")
+    p.add_argument("--token-env", default=None, help="tên biến token trong .env (mặc định TEST_DAU_01)")
     p.set_defaults(func=cmd_games)
 
     p = sub.add_parser("web", help="chơi trên server thi hexudon.hairbui76.id.vn")
     web_common(p)
     web_timing(p)
     p.add_argument("--token-env", action="append", default=[],
-                   help="tên biến token trong .env (mặc định TEST_DAU_02); lặp lại để chạy nhiều đội")
+                   help="tên biến token trong .env (mặc định TEST_DAU_01); lặp lại để chạy nhiều đội")
     p.add_argument("--follow", action="store_true",
                    help="theo dõi cả trận: mỗi câu mở ra là có một bot cho mỗi đội")
     p.add_argument("--game", default=None, help="ID câu: chơi thẳng, không cần danh sách trận")
@@ -417,6 +513,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--question", default=None, help="tên câu (Q01) hoặc ID câu")
     p.add_argument("--keep", action="store_true",
                    help="practice: không reset sau khi chơi, để xem trên website")
+    p.add_argument("--events", default=None,
+                   help="ghi sự kiện suy luận ra file JSONL (web trực quan hoá); chỉ khi chơi một câu, một token")
     p.add_argument("--summary", default=None, help=argparse.SUPPRESS)
     p.add_argument("--label", default=None, help=argparse.SUPPRESS)
     p.set_defaults(func=cmd_web)
@@ -425,7 +523,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--url", default=DEFAULT_URL)
     p.add_argument("--env", default=".env")
     p.add_argument("--timeout", type=float, default=5.0)
-    p.add_argument("--token-env", default=None, help="tên biến token trong .env (mặc định TEST_DAU_02)")
+    p.add_argument("--token-env", default=None, help="tên biến token trong .env (mặc định TEST_DAU_01)")
     p.add_argument("--match", required=True, help="ID hoặc tên trận practice")
     p.add_argument("--questions", default="all", help="all hoặc danh sách như Q01,Q03")
     p.add_argument("--jobs", type=int, default=1, help="số câu chạy song song (nên ≤ số lõi CPU − 1)")
@@ -433,6 +531,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", default=None, help="file JSON báo cáo (mặc định experiments/web-bench-<giờ>.json)")
     web_timing(p)
     p.set_defaults(func=cmd_web_bench, live=False)
+
+    p = sub.add_parser("viz", help="web trực quan hoá: tạo trận, xem bot suy luận, tua lại")
+    p.add_argument("--port", type=int, default=8765)
+    p.add_argument("--open", action="store_true", help="mở trình duyệt")
+    p.set_defaults(func=cmd_viz)
 
     return parser
 

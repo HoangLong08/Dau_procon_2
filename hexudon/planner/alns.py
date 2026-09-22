@@ -193,8 +193,15 @@ def improve(
     max_iterations: int = 1_000_000,
     seed: int = 0,
     on_better: Optional[Callable[[DaySolution, Decoded], None]] = None,
+    on_progress: Optional[Callable[[dict], None]] = None,
+    progress_every: float = 0.25,
 ) -> AlnsResult:
-    """Chạy ALNS tới hạn chót. Luôn trả về một nghiệm hợp lệ."""
+    """Chạy ALNS tới hạn chót. Luôn trả về một nghiệm hợp lệ.
+
+    `on_progress`, nếu có, nhận khoảng mỗi `progress_every` giây (và một lần cuối)
+    số vòng lặp, điểm hiện tại, điểm tốt nhất và trọng số toán tử. Nó không đụng
+    tới rng nên không đổi kết quả tìm kiếm.
+    """
     rng = random.Random((seed << 8) ^ (ctx.day + 1))
     began = time.monotonic()
     cur = start.copy() if start is not None else construct(ctx, rng)
@@ -208,6 +215,17 @@ def improve(
     since_best = 0
     it = 0
     max_stops = max(1, ctx.config.n_agents)
+    next_progress = began + progress_every
+
+    def report() -> None:
+        on_progress({
+            "iteration": it,
+            "elapsed": round(time.monotonic() - began, 3),
+            "current": round(cur_dec.score, 3),
+            "best": round(best_dec.score, 3),
+            "destroy": {name: round(w, 3) for name, w in destroy.weight.items()},
+            "repair": {name: round(w, 3) for name, w in repair_ops.weight.items()},
+        })
 
     while it < max_iterations:
         if deadline is not None and time.monotonic() >= deadline:
@@ -253,4 +271,10 @@ def improve(
             cur_dec = decode(ctx, cur)
             since_best = 0
 
+        if on_progress is not None and time.monotonic() >= next_progress:
+            next_progress = time.monotonic() + progress_every
+            report()
+
+    if on_progress is not None:
+        report()
     return AlnsResult(best, best_dec, it, time.monotonic() - began)

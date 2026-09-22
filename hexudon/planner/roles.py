@@ -140,9 +140,19 @@ def select_roles(
     weights: Optional[Weights] = None,
     seed: int = 0,
     log: Optional[Callable[[str], None]] = None,
+    on_candidate: Optional[Callable[[dict], None]] = None,
 ) -> Tuple[List[int], List[RoleCandidate]]:
-    """Chọn mảng loại xe. Hết giờ vẫn luôn trả về một phương án hợp lệ."""
+    """Chọn mảng loại xe. Hết giờ vẫn luôn trả về một phương án hợp lệ.
+
+    `on_candidate`, nếu có, nhận từng phương án ngay khi được chấm (để web vẽ bảng).
+    """
     log = log or (lambda msg: None)
+
+    def tell(cand: RoleCandidate, phase: str, score, **extra) -> None:
+        if on_candidate is not None:
+            on_candidate(dict(label=cand.label, kinds=list(cand.kinds), score=list(score),
+                              phase=phase, **extra))
+
     started = time.monotonic()
     hard_deadline = started + max(0.2, budget_seconds)
     options = candidates(config)
@@ -157,9 +167,11 @@ def select_roles(
         if days_done < config.n_days:
             # mẫu dở dang xếp hạng cùng mẫu đủ sẽ chọn sai; thà bỏ đi
             log(f"vai trò {cand.label}: bỏ, chỉ chơi được {days_done}/{config.n_days} ngày")
+            tell(cand, "skipped", cand.score, days=days_done)
             continue
         cand.evaluated = True
         log(f"vai trò {cand.label}: L={cand.score[0]} D={cand.score[1]} Q={cand.score[2]}")
+        tell(cand, "rollout", cand.score)
 
     ranked = sorted([c for c in options if c.evaluated], key=lambda c: c.score, reverse=True)
     if not ranked:
@@ -181,6 +193,7 @@ def select_roles(
                 seconds_per_day=per_day,
             )
             log(f"tinh chỉnh {cand.label}: L={cand.refined[0]} D={cand.refined[1]} Q={cand.refined[2]}")
+            tell(cand, "refine", cand.refined)
         best = max(finalists, key=lambda c: c.best())
     else:
         best = ranked[0]

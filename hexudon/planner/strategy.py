@@ -28,6 +28,7 @@ class MatchStrategist:
         role_seconds: Optional[float] = DEFAULT_ROLE_SECONDS,
         seed: int = 0,
         log: Optional[Callable[[str], None]] = None,
+        emit: Optional[Callable[[str, dict], None]] = None,
     ):
         self.config = config
         self.weights = weights or Weights()
@@ -36,6 +37,8 @@ class MatchStrategist:
         self.role_seconds = role_seconds
         self.seed = seed
         self.log = log or (lambda msg: None)
+        #: web trực quan hoá; None thì không phát gì và không tốn thêm thời gian
+        self.emit = emit
 
         self.kinds: List[int] = [rules.PATROL] * config.n_agents
         self.visited_brands: Set[int] = set()
@@ -78,8 +81,12 @@ class MatchStrategist:
             if cap < budget:
                 self.log(f"{why}: rút ngân sách chọn vai trò {budget:.1f}s -> {max(0.0, cap):.1f}s")
                 budget = max(0.0, cap)
+        emit = self.emit
+        extra = {}
+        if emit is not None:
+            extra["on_candidate"] = lambda row: emit("roles_candidate", row)
         kinds, options = select_roles(
-            self.config, budget_seconds=budget, weights=self.weights, seed=self.seed, log=self.log
+            self.config, budget_seconds=budget, weights=self.weights, seed=self.seed, log=self.log, **extra
         )
         self.kinds = kinds
         self.forecast = TrafficForecast(
@@ -89,6 +96,8 @@ class MatchStrategist:
         )
         n_cars = sum(1 for k in kinds if k == rules.REFUEL)
         self.log(f"chọn vai trò: {n_cars} xe tiếp nhiên liệu / {len(kinds)} agent -> {kinds}")
+        if emit is not None:
+            emit("roles_chosen", {"kinds": list(kinds)})
         return kinds
 
     # ---- mỗi ngày ----
@@ -126,6 +135,7 @@ class MatchStrategist:
     ) -> Decoded:
         """Lập kế hoạch cho một ngày; gọi submit ngay khi có bài an toàn."""
         cfg = self.config
+        started = time.monotonic()
         self.reconcile(state)
         # vai trò server báo mới là sự thật: lập kế hoạch theo vai trò ta MONG
         # muốn trong khi server nghĩ khác sẽ làm mọi bài bị từ chối vì E_NO_FUEL
@@ -145,8 +155,13 @@ class MatchStrategist:
             deadline = time.monotonic() + self.budget_for(state)
 
         sent = {"score": None}
+        on_safe, hooks = self._watch(state, agents, status, ctx.steps, started)
 
         def on_plan(decoded: Decoded):
+            nonlocal on_safe
+            if on_safe is not None:
+                on_safe(decoded)
+                on_safe = None
             if submit is None:
                 return
             if sent["score"] is not None and decoded.score <= sent["score"]:
@@ -154,9 +169,39 @@ class MatchStrategist:
             if submit(decoded.plan):
                 sent["score"] = decoded.score
 
-        best = plan_day(ctx, deadline=deadline, seed=self.seed, on_plan=on_plan)
+        best = plan_day(ctx, deadline=deadline, seed=self.seed, on_plan=on_plan, **hooks)
         self.record(state, best, status)
         return best
+
+    def _watch(self, state: DayState, agents: List[AgentState], status: Dict[int, int],
+               steps: int, started: float):
+        """Móc quan sát cho web: (hàm cho bài an toàn, {on_better, on_progress}).
+
+        Không có emit thì (None, {}): planner chạy đúng như cũ.
+        """
+        emit = self.emit
+        if emit is None:
+            return None, {}
+        from ..viz.shapes import simulate
+
+        stocks = [s.stocks for s in self.config.spots]
+
+        def describe(decoded: Decoded) -> dict:
+            _, trace = simulate(self.config, agents, decoded.plan, steps, stocks, status)
+            return {"day": state.day, "elapsed": round(time.monotonic() - started, 3),
+                    "score": round(decoded.score, 3), "types": len(decoded.result.brands),
+                    "servings": decoded.result.servings, "trace": trace}
+
+        def on_safe(decoded: Decoded) -> None:
+            row = describe(decoded)
+            row["ms"] = round(row.pop("elapsed") * 1000, 1)
+            emit("plan_safe", row)
+
+        return on_safe, {
+            "on_better": lambda decoded: emit("alns_better", describe(decoded)),
+            "on_progress": lambda row: emit("alns_progress", dict(
+                row, day=state.day, elapsed=round(time.monotonic() - started, 3))),
+        }
 
     def record(self, state: DayState, decoded: Decoded, status: Dict[int, int]) -> None:
         """Ghi nhớ kết quả của bài đã gửi để dùng cho ngày sau."""
@@ -185,6 +230,9 @@ class MatchStrategist:
             opponents_parked=counts_from_positions(opponents, self.config.road_cells),
             steps_today=self.config.steps_of_day(state.day),
         )
+        if self.emit is not None and state.day + 1 < self.config.n_days:
+            from ..viz.shapes import status_payload
+            self.emit("forecast", {"day": state.day + 1, "status": status_payload(self.forecast_next)})
         self.predicted_state = [
             AgentState(self.kinds[i], result.end_pos[i], result.end_fuel[i])
             for i in range(self.config.n_agents)

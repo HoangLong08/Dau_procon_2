@@ -12,7 +12,7 @@ from typing import List, Optional, Sequence
 from .net import jwt_claims, load_env
 
 LIVE_VAR = "TOKEN"
-DEFAULT_TEST_VAR = "TEST_DAU_02"
+DEFAULT_TEST_VAR = "TEST_DAU_01"  # đội mình: DAU 1
 EXPIRY_WARN_SECONDS = 2 * 3600
 
 

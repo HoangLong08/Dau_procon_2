@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HEXUDON Viz</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="bar">
+  <div class="row">
+    <label>Chế độ
+      <select id="mode">
+        <option value="offline">Offline (n bot)</option>
+        <option value="fake">Server giả</option>
+        <option value="real">Server thật</option>
+      </select>
+    </label>
+    <div id="offline-form" class="form">
+      <label>Map <select id="map"></select></label>
+      <label>Số ngày <input id="days" type="number" min="0" value="0" title="0 = đủ số ngày của map"></label>
+      <label>Seed <input id="seed" type="number" value="0"></label>
+      <div id="bot-list" class="bots"></div>
+      <button id="add-bot" type="button">+ thêm bot</button>
+    </div>
+    <div id="online-form" class="form" hidden>
+      <label>Token đọc danh sách <select id="list-token"></select></label>
+      <button id="load-questions" type="button">Tải danh sách câu</button>
+      <span id="fake-box">
+        <label>Giây/ngày <input id="fake-seconds" type="number" min="1" value="30"></label>
+        <button id="start-fake" type="button">Mở server giả</button>
+        <span id="fake-status" class="muted"></span>
+      </span>
+    </div>
+    <div class="actions">
+      <button id="run" type="button" class="primary">▶ Chạy</button>
+      <button id="stop" type="button">■ Dừng</button>
+      <label>Trận cũ <select id="runs"><option value="">—</option></select></label>
+    </div>
+  </div>
+  <div id="questions" class="questions" hidden></div>
+  <div id="banner" class="banner" hidden></div>
+</header>
+<main class="grid">
+  <section class="map-pane">
+    <canvas id="map-canvas"></canvas>
+    <div class="legend">
+      <span>● xe tuần tra</span><span>■ xe tiếp nhiên liệu</span>
+      <span><i class="sw busy"></i> đường đông</span><span><i class="sw jam"></i> đường tắc</span>
+      <span>- - lộ trình dự kiến</span><span>— đường đã đi</span><span>spot: số là loại udon, mờ là đã thu</span>
+    </div>
+  </section>
+  <aside class="side">
+    <section class="card">
+      <h2>Bảng điểm</h2>
+      <table id="scoreboard"></table>
+    </section>
+    <section class="card">
+      <h2>Suy luận <select id="bot-pick"></select> <span id="reason-day" class="muted"></span></h2>
+      <div id="reasoning"></div>
+    </section>
+  </aside>
+</main>
+<footer class="timeline">
+  <button id="day-prev" type="button" aria-label="ngày trước">◀</button>
+  <span id="day-label">Ngày –</span>
+  <button id="day-next" type="button" aria-label="ngày sau">▶</button>
+  <input id="step" type="range" min="0" max="0" value="0" aria-label="bước">
+  <span id="step-label">Bước 0/0</span>
+  <button id="play" type="button">▶ phát</button>
+  <select id="speed" aria-label="tốc độ">
+    <option value="1">x1</option><option value="4" selected>x4</option><option value="16">x16</option>
+  </select>
+  <button id="live" type="button" class="live">● TRỰC TIẾP</button>
+</footer>
+<section class="log card">
+  <h2>Nhật ký</h2>
+  <ol id="log"></ol>
+</section>
+<script type="module" src="/static/js/app.js"></script>
+</body>
+</html>

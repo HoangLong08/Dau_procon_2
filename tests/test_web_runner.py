@@ -149,7 +149,7 @@ class RunnerEndToEndTest(unittest.TestCase):
                 args, tokens, log=self.logs.append, status_every=0.2, questions_every=0.5,
                 stop_when=lambda sup: seen.append(sup) or len(sup.done) >= 1 or time.monotonic() - started > 60)
         self.assertEqual(code, 0)
-        self.assertEqual(self.world.contests[qid].board.teams[78].days_submitted, 2)
+        self.assertEqual(self.world.contests[qid].board.teams[77].days_submitted, 2)
         self.assertTrue(any("KeyError" in m for m in self.logs), "lỗi phải hiện trong log của cha")
 
     def test_follow_waits_for_a_match_that_is_not_published_yet(self):
@@ -168,7 +168,7 @@ class RunnerEndToEndTest(unittest.TestCase):
                                  questions_every=0.5,
                                  stop_when=lambda sup: len(sup.done) >= 1 or time.monotonic() - started > 60)
         self.assertEqual(code, 0)
-        team = self.world.contests[published[0]].board.teams[78]
+        team = self.world.contests[published[0]].board.teams[77]
         self.assertTrue(team.types_selected)
         self.assertEqual(team.days_submitted, 2)
 
@@ -187,8 +187,8 @@ class RunnerEndToEndTest(unittest.TestCase):
     def test_follow_waiting_for_the_match_rereads_a_replaced_token(self):
         self.world.add_question("Q01", small_config(), 1, "Local Contest")
         args = self.args("web", "--match", "1", "--follow")
-        tokens = pick_tokens(self.env, args.token_env, False)          # TEST_DAU_02, đội 78
-        self.world.revoke(self.tokens[78])                              # manager API trả 401
+        tokens = pick_tokens(self.env, args.token_env, False)          # TEST_DAU_01, đội 77
+        self.world.revoke(self.tokens[77])                              # manager API trả 401
         naps = []
 
         def sleep(seconds):          # người dùng dán token mới vào .env trong lúc bot chờ
@@ -196,7 +196,8 @@ class RunnerEndToEndTest(unittest.TestCase):
             if len(naps) > 3:
                 raise AssertionError("token mới trong .env không được đọc lại")
             with open(self.env, "w", encoding="utf-8") as fh:
-                fh.write(f"TOKEN={self.tokens[77]}\nTEST_DAU_02={self.world.issue_token(78)}\n")
+                fresh = self.world.issue_token(77)
+                fh.write(f"TOKEN={fresh}\nTEST_DAU_01={fresh}\n")
 
         code = web_runner.follow(args, tokens, log=self.logs.append, sleep=sleep,
                                  stop_when=lambda sup: any("theo dõi trận" in m for m in self.logs))
@@ -246,9 +247,9 @@ class RunnerEndToEndTest(unittest.TestCase):
         config = small_config()
         q1 = self.world.add_question("Q01", config, 2, "Local Practice", practice=True, selection_seconds=1.0)
         self.world.add_question("Q02", config, 2, "Local Practice", practice=True, selection_seconds=1.0)
-        peer = WebApi(JsonHttp(self.url), lambda: self.tokens[77])
-        peer.agent_types(f"{q1}:77", [0, 0, 0])
-        peer.practice_actions(f"{q1}:77", 0, wait_plan(3, config.steps_of_day(0)))
+        peer = WebApi(JsonHttp(self.url), lambda: self.tokens[78])
+        peer.agent_types(f"{q1}:78", [0, 0, 0])
+        peer.practice_actions(f"{q1}:78", 0, wait_plan(3, config.steps_of_day(0)))
         report_path = os.path.join(self.dir, "bench.json")
         args = self.args("web-bench", "--match", "Local Practice", "--jobs", "2",
                          "--search-seconds", "0.3", "--out", report_path)
@@ -262,7 +263,7 @@ class RunnerEndToEndTest(unittest.TestCase):
             self.assertEqual(row["mismatch_days"], [])
         self.assertEqual(rows["Q01"]["peers_with_data"], 1)
         self.assertEqual(rows["Q02"]["peers_with_data"], 0)
-        self.assertEqual(self.world.practice_game(q1, 78).board.status(), "selecting_agents")
+        self.assertEqual(self.world.practice_game(q1, 77).board.status(), "selecting_agents")
 
 
 if __name__ == "__main__":

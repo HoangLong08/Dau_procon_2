@@ -94,6 +94,13 @@ def play_one(args, tok: TeamToken, log: Log) -> int:
         banner(tok, ref, log)
     replay_path, summary_path = run_paths(args, ref, tok)
     replay = ReplayWriter(replay_path)
+    events_path = getattr(args, "events", None)
+    writer = None
+    emit = None
+    if events_path:
+        from ..viz.events import EventWriter
+        writer = EventWriter(events_path)
+        emit = writer.for_bot(tok.var)
     try:
         api = make_api(args.url, tok, args.timeout, log, replay)
         transport = WebTransport(api, ref, tok.team_id, keep=args.keep, live=args.live,
@@ -101,14 +108,24 @@ def play_one(args, tok: TeamToken, log: Log) -> int:
                                  token_reload=tok.reload, token_var=tok.var, log=log, replay=replay)
         session = MatchSession(transport, search_seconds=args.search_seconds,
                                net_margin=args.net_margin, role_seconds=args.role_seconds,
-                               seed=args.seed, log=log, replay=replay)
-        session.run()
+                               seed=args.seed, log=log, replay=replay, emit=emit)
+        try:
+            session.run()
+        except KeyboardInterrupt:
+            if emit is not None:
+                emit("log", {"text": "dừng theo yêu cầu (Ctrl-C)", "level": "warn"})
+            raise
         predicted = list(session.strategist.score_tuple()) if session.strategist else None
         summary = transport.finish(summary_path, extra={
             "team_name": tok.team_name, "token_var": tok.var,
             "predicted": predicted, "roles": transport.kinds})
+        if emit is not None:
+            emit("match_end", {"score": summary.get("score"), "replay_check": summary.get("replay_check"),
+                               "predicted": predicted})
     finally:
         replay.close()
+        if writer is not None:
+            writer.close()
     score = summary.get("score")
     if score:
         log(f"KẾT QUẢ {ref.label()}: L={score['L']} D={score['D']} Q={score['Q']}, "

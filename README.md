@@ -7,7 +7,7 @@ Python thuần, **không cài gì thêm** — chỉ thư viện chuẩn. Yêu c�
 
 ```bash
 git clone <repo> && cd procon-2026
-python -m unittest discover -s tests     # 172 test, phải xanh toàn bộ
+python -m unittest discover -s tests     # 211 test, phải xanh toàn bộ
 ```
 
 ---
@@ -25,7 +25,7 @@ TEST_DAU_01=<token test>
 TEST_DAU_02=<token test>
 ```
 
-`TOKEN` chỉ dùng được khi có `--live`; không chỉ định gì thì bot dùng `TEST_DAU_02`.
+`TOKEN` chỉ dùng được khi có `--live`; không chỉ định gì thì bot dùng `TEST_DAU_01` (đội DAU 1 của mình).
 Token sống 48 giờ — lấy token mới trước mỗi buổi thi.
 
 ```bash
@@ -39,7 +39,7 @@ Luyện tập (không cần `--live`; hướng dẫn test đầy đủ ở [mụ
 ```bash
 python -m hexudon web --match "Practice Match" --question Q01     # trọn một câu practice
 python -m hexudon web --match "Mock Contest" --follow \
-       --token-env TEST_DAU_02                                    # thi thử có giờ, một token
+       --token-env TEST_DAU_01                                    # thi thử có giờ, một token
 python -m hexudon web-bench --match "Practice Match" --jobs 3     # loạt practice, so điểm
 python -m hexudon serve --web                                     # server giả, không cần mạng
 ```
@@ -120,6 +120,8 @@ python -m hexudon roles --map data/sample_maps/sample_32.json
 | `games` | liệt kê trận/câu trên server thi, kèm ID và trạng thái |
 | `web` | chơi trên server thi: một câu, nhiều đội (`--token-env` lặp lại), hoặc cả trận (`--follow`) |
 | `web-bench` | chạy loạt câu practice trên server thi, so điểm với đội khác |
+| `viz` | web trực quan hoá trên 127.0.0.1: tạo n bot thi với nhau, xem suy luận, tua lại |
+| `arena` | trận offline n bot ghi sự kiện (web `viz` gọi lệnh này) |
 | `serve --web` | server giả nói giao thức của server thi, để tập dượt |
 | `play` | thi đấu thật qua HTTP |
 | `sandbox` | thi đấu khi ban tổ chức chấm qua stdin/stdout |
@@ -339,7 +341,7 @@ Ba mức, từ nhanh tới giống ngày thi nhất. Mọi lệnh chạy ở th�
 ### 6.1. Test tự động (khoảng 2 phút, không cần mạng)
 
 ```bash
-python -m unittest discover -s tests      # phải ra: Ran 172 tests ... OK
+python -m unittest discover -s tests      # phải ra: Ran 211 tests ... OK
 ```
 
 ### 6.2. Tập dượt trên máy bằng server giả (không cần mạng, không cần token thật)
@@ -355,7 +357,7 @@ python -m hexudon serve --web --day-seconds 30
 # cửa sổ 2: copy lệnh server in ra, ví dụ
 python -m hexudon games --url http://127.0.0.1:8099 --env experiments/local.env
 python -m hexudon web --url http://127.0.0.1:8099 --env experiments/local.env \
-       --match 1 --follow --token-env TEST_DAU_02
+       --match 1 --follow --token-env TEST_DAU_01
 python -m hexudon web-bench --url http://127.0.0.1:8099 --env experiments/local.env --match 2
 ```
 
@@ -365,14 +367,14 @@ giây (mặc định 60) server thu hồi token giữa trận và ghi token mớ
 
 ### 6.3. Test trên server thật bằng token test
 
-Không cần `--live`: mặc định bot dùng `TEST_DAU_02`.
+Không cần `--live`: mặc định bot dùng `TEST_DAU_01` (đội DAU 1).
 
 | Mục đích | Lệnh | Thời gian |
 |---|---|---|
 | Xem trận, câu, trạng thái | `python -m hexudon games` | vài giây |
 | Practice nhanh, kiểm kết nối | `python -m hexudon web --match "Practice Match" --question Q01 --search-seconds 3 --role-seconds 3` | ~1 phút |
 | Practice đúng nhịp thi thật | `python -m hexudon web --match "Practice Match" --question Q02` | ~5–6 phút |
-| **Thi thử có giờ — giống ngày thi nhất** | `python -m hexudon web --match "Mock Contest" --follow --token-env TEST_DAU_02` | tới khi dừng |
+| **Thi thử có giờ — giống ngày thi nhất** | `python -m hexudon web --match "Mock Contest" --follow --token-env TEST_DAU_01` | tới khi dừng |
 | Loạt practice, so điểm đội khác | `python -m hexudon web-bench --match "Practice Match" --jobs 3` | ~20–25 phút |
 
 Mock Contest tự chạy lại mỗi câu sau 10 phút nên bot bắt câu mới liên tục. Ctrl-C
@@ -397,7 +399,8 @@ Mock Contest tự chạy lại mỗi câu sau 10 phút nên bot bắt câu mới
 ### 6.5. Lưu ý khi test
 
 - Đừng dùng `--live` khi test — nó dùng `TOKEN` của đội thật.
-- `TEST_DAU_01` trùng `TOKEN`: test bằng nó là chơi dưới tên đội DAU 1. Practice được
+- `TEST_DAU_01` (mặc định) trùng `TOKEN`: test bằng nó là chơi dưới tên đội DAU 1, nên bot
+  luôn in cảnh báo `trùng TOKEN thi thật` — đó là bình thường. Practice được
   bot reset sau khi đã lưu kết quả, nên đội khác không đọc được lộ trình.
 - Thi thử Mock Contest nên dùng **một** token: hai token trên 8 câu cùng lúc (16 bot)
   từng làm laptop 8 lõi quá tải và nhiều lần nộp bị timeout.
@@ -433,7 +436,32 @@ Phần lõi:
 
 ---
 
-## 7. Việc còn lại
+## 7. Web trực quan hoá
+
+```bash
+python -m hexudon viz --open        # mở http://127.0.0.1:8765
+```
+
+- **Offline (n bot):** chọn map, thêm bot (`search` kèm số giây mỗi ngày, `greedy`, `sample`,
+  `wait`), bấm ▶ Chạy. Trọng tài là simulator của repo; các bot chỉ ảnh hưởng nhau qua giao thông.
+- **Server giả:** bấm "Mở server giả" (hoặc tự chạy `python -m hexudon serve --web`), "Tải danh sách
+  câu", chọn câu và token, ▶ Chạy.
+- **Server thật:** chỉ Practice và Mock Contest, chỉ token `TEST_*`, không có `--live`. `TEST_DAU_01`
+  trùng `TOKEN`, nên bài web gửi mang tên đội DAU 1. **Giờ thi thật vẫn dùng
+  `python -m hexudon web --live --match … --follow`, không dùng web.**
+- **Xem:** bản đồ (đường vàng/đỏ là đông/tắc, nét đứt là lộ trình bot đang nghĩ), bảng điểm, khung
+  Suy luận (vai trò, biểu đồ ALNS, các lần gửi bài, dự báo giao thông), nhật ký.
+- **Tua:** thanh ngày/bước và nút ▶ phát; "● TRỰC TIẾP" để bám trận đang chạy; "Trận cũ" để mở lại.
+  Dữ liệu nằm ở `replays/viz/<trận>/`.
+- Bot `web` hoặc `arena` chạy từ dòng lệnh cũng ghi được sự kiện bằng `--events <file.jsonl>`; file này
+  là JSONL thuần (đọc lại bằng `hexudon.viz.events.read_events`) và **không** hiện trong "Trận cũ" — mục
+  đó chỉ liệt kê các trận mở từ chính web.
+- **Dừng:** bấm một lần để bot dừng (Ctrl-C), lần hai để dừng hẳn; tắt web (Ctrl-C hoặc đóng terminal)
+  cũng dừng mọi bot web đã mở.
+
+---
+
+## 8. Việc còn lại
 
 Bốn điểm đã xác định nhưng **chưa sửa** — đều là ăn thêm điểm chứ không phải lỗi
 sống còn, và đều đổi hành vi tìm kiếm nên cần benchmark đối chứng trước/sau:

@@ -75,7 +75,7 @@ class WebCliTest(unittest.TestCase):
         with open(summary_path, encoding="utf-8") as fh:
             summary = json.load(fh)
         self.assertEqual(summary["score"]["days_submitted"], 2)
-        self.assertEqual(summary["token_var"], "TEST_DAU_02")
+        self.assertEqual(summary["token_var"], "TEST_DAU_01")
         for path in glob.glob(os.path.join(self.out, "*")):
             with open(path, encoding="utf-8") as fh:
                 content = fh.read()

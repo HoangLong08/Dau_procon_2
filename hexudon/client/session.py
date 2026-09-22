@@ -52,6 +52,7 @@ class MatchSession:
         weights: Optional[Weights] = None,
         log: Optional[Callable[[str], None]] = None,
         replay: Optional[ReplayWriter] = None,
+        emit: Optional[Callable[[str, dict], None]] = None,
     ):
         self.transport = transport
         self.search_seconds = search_seconds
@@ -61,6 +62,18 @@ class MatchSession:
         self.weights = weights
         self.log = log or (lambda msg: None)
         self.replay = replay or (lambda entry: None)
+        #: web trực quan hoá: emit(kind, data) hoặc None
+        self.emit = emit
+        if emit is not None:
+            from ..viz.events import log_level
+
+            plain_log = self.log
+
+            def log_both(msg: str) -> None:
+                plain_log(msg)
+                emit("log", {"text": msg, "level": log_level(msg)})
+
+            self.log = log_both
         self.strategist: Optional[MatchStrategist] = None
         self.config: Optional[MatchConfig] = None
         #: server có thể đánh số ngày từ 1 thay vì 0; học từ lần bị từ chối đầu tiên
@@ -73,12 +86,18 @@ class MatchSession:
             # câu đã xong trước khi bot vào, hoặc mất liên lạc ngay từ đầu
             self.log(f"trận kết thúc trước khi bắt đầu: {end.args[0] if end.args else ''}")
             return self.transport.get_result()
+        if self.emit is not None:
+            from ..viz.shapes import config_payload
+            self.emit("match_start", {"mode": "online", "config": config_payload(self.config)})
         self.strategist = MatchStrategist(
             self.config, weights=self.weights, search_seconds=self.search_seconds,
             net_margin=self.net_margin, role_seconds=self.role_seconds,
-            seed=self.seed, log=self.log,
+            seed=self.seed, log=self.log, emit=self.emit,
         )
         kinds = self.choose_roles()
+        if self.emit is not None:
+            # vai trò thật sự dùng: có thể khác vai trò đã chọn khi server không nhận
+            self.emit("roles_chosen", {"kinds": list(kinds)})
 
         while True:
             try:
@@ -173,6 +192,13 @@ class MatchSession:
         if state.ends_at is not None:
             hard_deadline = started + max(0.0, state.ends_at - time.time())
         sent = {"count": 0, "ok": False}
+        accepted = {"plan": None}
+        if self.emit is not None:
+            from ..viz.shapes import agents_payload, status_payload
+            self.emit("day_start", {"day": state.day, "steps": steps,
+                                    "status": status_payload(state.road_status),
+                                    "agents": agents_payload(state.agents),
+                                    "others": [agents_payload(team) for team in state.others]})
 
         def submit(plan: List[List[int]]) -> bool:
             if hard_deadline is not None and time.monotonic() >= hard_deadline:
@@ -182,6 +208,12 @@ class MatchSession:
             ack = self.transport.send_actions(state.day, plan, deadline=hard_deadline)
             sent["count"] += 1
             sent["ok"] = sent["ok"] or ack.ok
+            if ack.ok:
+                accepted["plan"] = plan
+            if self.emit is not None:
+                self.emit("submit", {"day": state.day, "n": sent["count"], "ok": ack.ok,
+                                     "reason": ack.reason,
+                                     "elapsed": round(time.monotonic() - started, 3)})
             self.replay({"day": state.day, "plan": plan, "ok": ack.ok, "reason": ack.reason})
             if not ack.ok:
                 self.log(f"{self.day_label(state.day)}: bài bị từ chối ({ack.reason})")
@@ -202,6 +234,7 @@ class MatchSession:
             self.log(f"{self.day_label(state.day)}: planner lỗi {exc!r}")
             if not sent["ok"]:
                 submit(wait_plan(self.config.n_agents, self.steps_for(state.day)))
+            self._emit_day_result(state, accepted["plan"])
             return None
 
         if sent["count"] == 0 or not sent["ok"]:
@@ -217,9 +250,29 @@ class MatchSession:
             )
             submit(decoded.plan)
 
+        self._emit_day_result(state, accepted["plan"])
         elapsed = time.monotonic() - started
         self.log(
             f"{self.day_label(state.day)}: {len(decoded.result.brands)} loại, {decoded.result.servings} phần, "
             f"gửi {sent['count']} lần, {elapsed:.2f}s (ngân sách {budget:.2f}s)"
         )
         return decoded
+
+    def _emit_day_result(self, state: DayState, plan: Optional[List[List[int]]]) -> None:
+        """Mô phỏng bài được nhận cuối cùng để web vẽ lại từng bước; điểm thật vẫn là của server."""
+        if self.emit is None or self.config is None:
+            return
+        from ..viz.shapes import simulate
+
+        steps = self.steps_for(state.day)
+        applied = plan if plan is not None else wait_plan(self.config.n_agents, steps)
+        result, trace = simulate(self.config, state.agents, applied, steps,
+                                 [s.stocks for s in self.config.spots], state.road_status)
+        error = trace["error"]
+        if plan is None:
+            error = {"code": "NOT_ACCEPTED", "agent": -1, "step": 0,
+                     "detail": "server không nhận bài nào trong ngày"}
+        total = list(self.strategist.score_tuple()) if self.strategist is not None else None
+        self.emit("day_result", {"day": state.day, "ok": plan is not None and result.ok, "error": error,
+                                 "types": len(result.brands), "servings": result.servings,
+                                 "brands": sorted(result.brands), "trace": trace, "total": total})

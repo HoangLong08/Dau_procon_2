@@ -37,14 +37,16 @@ class SearchBot(Bot):
 
     def __init__(self, config: MatchConfig, search_seconds: float = 1.0,
                  role_seconds: float = 5.0, seed: int = 0, weights: Optional[Weights] = None,
-                 kinds: Optional[Sequence[int]] = None):
+                 kinds: Optional[Sequence[int]] = None, emit=None):
         self.config = config
         self.seed = seed
         self.fixed_kinds = list(kinds) if kinds is not None else None
         self.role_seconds = role_seconds
+        #: web trực quan hoá: hàm emit(kind, data) hoặc None
+        self.emit = emit
         self.strategist = MatchStrategist(
             config, weights=weights, search_seconds=search_seconds,
-            net_margin=0.0, role_seconds=role_seconds, seed=seed,
+            net_margin=0.0, role_seconds=role_seconds, seed=seed, emit=emit,
         )
 
     def select_roles(self) -> List[int]:
@@ -54,8 +56,20 @@ class SearchBot(Bot):
         return self.strategist.select_roles()
 
     def plan(self, state: DayState) -> List[List[int]]:
-        decoded = self.strategist.plan_day(state)
-        return decoded.plan
+        if self.emit is None:
+            return self.strategist.plan_day(state).plan
+        started = time.monotonic()
+        count = {"n": 0}
+
+        def submit(plan: List[List[int]]) -> bool:
+            # offline không có server: mỗi lần strategist "gửi" đều được nhận,
+            # bài cuối cùng mới là bài trọng tài chấm, như luật thật
+            count["n"] += 1
+            self.emit("submit", {"day": state.day, "n": count["n"], "ok": True, "reason": None,
+                                 "elapsed": round(time.monotonic() - started, 3)})
+            return True
+
+        return self.strategist.plan_day(state, submit=submit).plan
 
 
 class GreedyBot(Bot):

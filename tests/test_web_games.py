@@ -113,13 +113,13 @@ class GamesCommandTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             env = os.path.join(tmp, ".env")
             with open(env, "w", encoding="utf-8") as fh:
-                fh.write(f"TEST_DAU_02={world.issue_token(78)}\n")
+                fh.write(f"TEST_DAU_01={world.issue_token(77)}\n")
             out, err = io.StringIO(), io.StringIO()
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                 code = main(["games", "--url", url, "--env", env])
         self.assertEqual(code, 0, err.getvalue())
         text = out.getvalue()
-        self.assertIn("DAU 2 (id 78)", text)
+        self.assertIn("DAU 1 (id 77)", text)
         self.assertIn(contest, text)
         self.assertIn("chờ mở cửa sổ chọn xe", text)
         self.assertIn(practice, text)

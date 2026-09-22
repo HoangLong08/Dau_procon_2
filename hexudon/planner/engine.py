@@ -59,10 +59,14 @@ def plan_day(
     seed: int = 0,
     on_plan: Optional[Callable[[Decoded], None]] = None,
     max_iterations: int = 1_000_000,
+    on_better: Optional[Callable[[Decoded], None]] = None,
+    on_progress: Optional[Callable[[dict], None]] = None,
 ) -> Decoded:
     """Lập kế hoạch một ngày: gửi bài an toàn trước, rồi cải thiện tới hạn chót.
 
-    on_plan được gọi mỗi khi có kế hoạch tốt hơn đáng để gửi đi.
+    on_plan được gọi mỗi khi có kế hoạch tốt hơn đáng để gửi đi. Hai móc còn lại
+    chỉ để quan sát: on_better nhận mọi nghiệm ALNS tốt hơn hẳn mọi nghiệm trước
+    đó (kể cả bài an toàn); on_progress chuyển thẳng cho ALNS.
     """
     first = safe_plan(ctx, seed)
     if on_plan is not None:
@@ -72,7 +76,10 @@ def plan_day(
     best_seen = {"score": first.score}
 
     def better(_sol, decoded: Decoded):
-        best_seen["score"] = max(best_seen["score"], decoded.score)
+        if decoded.score > best_seen["score"]:
+            best_seen["score"] = decoded.score
+            if on_better is not None:
+                on_better(decoded)
 
     result = improve(
         ctx,
@@ -81,6 +88,7 @@ def plan_day(
         max_iterations=max_iterations,
         seed=seed,
         on_better=better,
+        on_progress=on_progress,
     )
     final = result.decoded if result.decoded.score > first.score else first
     if on_plan is not None and final is not first:

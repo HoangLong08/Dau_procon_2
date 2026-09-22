@@ -38,8 +38,13 @@ class MatchOutcome:
         return self.ranking()[0]
 
 
-def run_match(config: MatchConfig, bots: Sequence, log=None, collect_forecast=False) -> MatchOutcome:
-    """Chạy trọn trận. Mỗi bot là một đối tượng theo giao diện offline.bots.Bot."""
+def run_match(config: MatchConfig, bots: Sequence, log=None, collect_forecast=False,
+              observer=None) -> MatchOutcome:
+    """Chạy trọn trận. Mỗi bot là một đối tượng theo giao diện offline.bots.Bot.
+
+    `observer`, nếu có (web trực quan hoá), được báo khi các đội đã chọn vai trò,
+    khi mỗi ngày mở, và sau mỗi (đội, ngày) kèm vết từng bước của simulator.
+    """
     log = log or (lambda msg: None)
     records: List[TeamRecord] = []
     for bot in bots:
@@ -49,6 +54,8 @@ def run_match(config: MatchConfig, bots: Sequence, log=None, collect_forecast=Fa
         agents = [AgentState(kinds[i], config.agent_starts[i], config.fuel_limits)
                   for i in range(config.n_agents)]
         records.append(TeamRecord(name=getattr(bot, "name", "bot"), kinds=kinds, agents=agents))
+    if observer is not None:
+        observer.match_ready(records)
 
     stay_history: List[Dict[int, int]] = []
     day_logs: List[dict] = []
@@ -58,6 +65,8 @@ def run_match(config: MatchConfig, bots: Sequence, log=None, collect_forecast=Fa
         steps = config.steps_of_day(day)
         status = ({c: rules.SMOOTH for c in config.road_cells} if day == 0
                   else road_status_from_history(config, stay_history))
+        if observer is not None:
+            observer.day_start(day, steps, status, records)
         combined: Dict[int, int] = {}
         day_entry = {"day": day, "steps": steps, "teams": []}
 
@@ -79,15 +88,19 @@ def run_match(config: MatchConfig, bots: Sequence, log=None, collect_forecast=Fa
 
             stocks = [s.stocks for s in config.spots]
             result = None
+            error = None
+            trace = [] if observer is not None else None
             if plan is not None:
-                result = run_day(config, steps, rec.agents, plan, stocks, status)
+                result = run_day(config, steps, rec.agents, plan, stocks, status, trace=trace)
                 if not result.ok:
                     log(f"ngày {day} đội {rec.name}: bài KHÔNG hợp lệ ({result.error})")
                     rec.invalid_days += 1
+                    error = result.error
                     result = None
             if result is None:
+                trace = [] if observer is not None else None
                 result = run_day(config, steps, rec.agents, wait_plan(config.n_agents, steps),
-                                 stocks, status)
+                                 stocks, status, trace=trace)
 
             rec.brands |= result.brands
             rec.daily_types += len(result.brands)
@@ -98,6 +111,8 @@ def run_match(config: MatchConfig, bots: Sequence, log=None, collect_forecast=Fa
                 combined[cell] = combined.get(cell, 0) + n
             if hasattr(bot, "observe"):
                 bot.observe(state, result)
+            if observer is not None:
+                observer.team_day(idx, rec, state, plan, result, elapsed, error, trace)
             day_entry["teams"].append({
                 "name": rec.name,
                 "types": len(result.brands),
