@@ -34,12 +34,12 @@ python -m hexudon web --live --match <ID|tên> --follow    # thi thật: bắt m
 python -m hexudon web --live --game <ID câu>              # một câu, khi manager API lỗi
 ```
 
-Luyện tập (không cần `--live`):
+Luyện tập (không cần `--live`; hướng dẫn test đầy đủ ở [mục 6](#6-test-bot)):
 
 ```bash
 python -m hexudon web --match "Practice Match" --question Q01     # trọn một câu practice
 python -m hexudon web --match "Mock Contest" --follow \
-       --token-env TEST_DAU_01 --token-env TEST_DAU_02            # thi thử hai đội
+       --token-env TEST_DAU_02                                    # thi thử có giờ, một token
 python -m hexudon web-bench --match "Practice Match" --jobs 3     # loạt practice, so điểm
 python -m hexudon serve --web                                     # server giả, không cần mạng
 ```
@@ -332,13 +332,92 @@ Bot tự xử lý các tình huống sau, không cần can thiệp — mỗi dò
 
 ---
 
-## 6. Kiểm thử
+## 6. Test bot
+
+Ba mức, từ nhanh tới giống ngày thi nhất. Mọi lệnh chạy ở thư mục gốc repo.
+
+### 6.1. Test tự động (khoảng 2 phút, không cần mạng)
 
 ```bash
-python -m unittest discover -s tests
+python -m unittest discover -s tests      # phải ra: Ran 172 tests ... OK
 ```
 
-Ba nhóm đáng chú ý:
+### 6.2. Tập dượt trên máy bằng server giả (không cần mạng, không cần token thật)
+
+Server giả nói đúng giao thức của server thi (cửa sổ chọn xe giấu bản đồ, hạn ngày,
+practice tự nhịp, replay từng bước). Nó ghi token giả vào `experiments/local.env` và in
+sẵn các lệnh để copy:
+
+```bash
+# cửa sổ 1: server giả, mỗi ngày 30 s như thi thật
+python -m hexudon serve --web --day-seconds 30
+
+# cửa sổ 2: copy lệnh server in ra, ví dụ
+python -m hexudon games --url http://127.0.0.1:8099 --env experiments/local.env
+python -m hexudon web --url http://127.0.0.1:8099 --env experiments/local.env \
+       --match 1 --follow --token-env TEST_DAU_02
+python -m hexudon web-bench --url http://127.0.0.1:8099 --env experiments/local.env --match 2
+```
+
+Tập sự cố: thêm `--faults 429,5xx,401` khi mở server giả. Với `401`, sau `--revoke-after`
+giây (mặc định 60) server thu hồi token giữa trận và ghi token mới vào
+`experiments/local.env` — bot phải tự đọc lại và chơi tiếp.
+
+### 6.3. Test trên server thật bằng token test
+
+Không cần `--live`: mặc định bot dùng `TEST_DAU_02`.
+
+| Mục đích | Lệnh | Thời gian |
+|---|---|---|
+| Xem trận, câu, trạng thái | `python -m hexudon games` | vài giây |
+| Practice nhanh, kiểm kết nối | `python -m hexudon web --match "Practice Match" --question Q01 --search-seconds 3 --role-seconds 3` | ~1 phút |
+| Practice đúng nhịp thi thật | `python -m hexudon web --match "Practice Match" --question Q02` | ~5–6 phút |
+| **Thi thử có giờ — giống ngày thi nhất** | `python -m hexudon web --match "Mock Contest" --follow --token-env TEST_DAU_02` | tới khi dừng |
+| Loạt practice, so điểm đội khác | `python -m hexudon web-bench --match "Practice Match" --jobs 3` | ~20–25 phút |
+
+Mock Contest tự chạy lại mỗi câu sau 10 phút nên bot bắt câu mới liên tục. Ctrl-C
+**một lần**: thôi bắt câu mới, các câu đang chơi vẫn chơi nốt; **lần hai**: dừng hết.
+
+### 6.4. Đọc kết quả
+
+- Tốt:
+  - `KẾT QUẢ …: L=… D=… Q=…, hạng …` sau mỗi câu (với `--follow`: dòng `xong … : L=… D=… Q=… hạng …, lệch simulator 0 ngày`);
+  - `đối chiếu … với replay của server: khớp hoàn toàn` — simulator hiểu luật đúng như server.
+- Cần xem lại ngay nếu thấy: `LỆCH LUẬT`, `bài bị từ chối`, `gửi vai trò thất bại`,
+  `quá hạn, không gửi nữa`, `Cloudflare chặn`, `server từ chối token`.
+- File trong `replays/`:
+  - `-summary.json`: điểm, hạng, kết quả đối chiếu (`replay_check`);
+  - `-replay.json`: replay của server;
+  - `.jsonl`: mọi request/response của lần chơi;
+  - `.log`: log của từng tiến trình con khi chạy `--follow` hoặc `web-bench`.
+- `web-bench` ghi thêm báo cáo `experiments/web-bench-<giờ>.json`.
+- Trên Practice, trường `days_submitted` trong điểm server trả không đáng tin (đã thấy
+  luôn báo 55); L, D, Q thì đúng cho từng câu.
+
+### 6.5. Lưu ý khi test
+
+- Đừng dùng `--live` khi test — nó dùng `TOKEN` của đội thật.
+- `TEST_DAU_01` trùng `TOKEN`: test bằng nó là chơi dưới tên đội DAU 1. Practice được
+  bot reset sau khi đã lưu kết quả, nên đội khác không đọc được lộ trình.
+- Thi thử Mock Contest nên dùng **một** token: hai token trên 8 câu cùng lúc (16 bot)
+  từng làm laptop 8 lõi quá tải và nhiều lần nộp bị timeout.
+- Trong lúc bot chạy, đừng chọn loại xe hay nộp bài trên website cho câu bot đang chơi.
+- Token test cũng chỉ sống 48 giờ — hết hạn thì lấy token mới rồi dán vào `.env`.
+
+### 6.6. Các nhóm test đáng chú ý
+
+Phần kết nối server thi:
+
+- **`tests/test_web_transport.py`**, **`tests/test_web_runner.py`** — bot chơi trọn trận
+  trên server giả qua HTTP thật: practice gửi đúng một lần mỗi ngày, contest chờ cửa sổ
+  chọn xe, `--follow` hai đội trên hai câu gối đầu, `--live` không chạm endpoint practice
+  và không để lọt token vào file nào.
+- **`tests/test_replay_check.py`** — đối chiếu replay: khớp khi server chạy đúng luật của
+  ta, và chỉ đúng ngày, bước, xe khi có một giá trị bị sửa.
+- **`tests/test_web_api.py`** — đọc response thật của server (fixture chụp ngày
+  2026-09-21) bằng parser sẵn có.
+
+Phần lõi:
 
 - **`tests/test_simulator_golden.py`** — tái hiện đúng ví dụ 8 tác nhân trong tài
   liệu bổ sung (補足資料) của ban tổ chức Nhật, kiểm tới từng ô, từng đơn vị nhiên
