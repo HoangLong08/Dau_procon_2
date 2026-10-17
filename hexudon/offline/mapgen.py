@@ -69,12 +69,16 @@ def generate(
     chains: Optional[int] = None,
     days: Optional[int] = None,
 ) -> MatchConfig:
-    """Sinh một cấu hình trận hợp lệ, mọi tham số nằm trong giới hạn BTC."""
+    """Sinh một cấu hình trận hợp lệ, mọi tham số nằm trong giới hạn BTC.
+
+    Rộng và cao bốc riêng khi không truyền `size` (đề: mỗi chiều 8–32, có thể
+    khác nhau, cases 6.15); số bước từng ngày bốc riêng, không sắp xếp (cases 5.7).
+    """
     rng = random.Random(seed)
     if size is not None:
         width = height = size
     width = width or rng.randint(8, 32)
-    height = height or width
+    height = height or rng.randint(8, 32)
     n = width * height
     neighbors = build_neighbor_table(width, height)
     n_agents = agents if agents is not None else rng.randint(3, 8)
@@ -120,10 +124,12 @@ def generate(
         ]
         n_days = days if days is not None else rng.randint(4, 10)
         lo, hi = width + height, 4 * (width + height)
-        day_steps = sorted(rng.randint(lo, min(hi, lo * 2)) for _ in range(n_days))
-        fuel = int(day_steps[0] * rng.uniform(1.0, 3.0))
+        day_steps = [rng.randint(lo, min(hi, lo * 2)) for _ in range(n_days)]
+        # đề không cho F nhỏ nhất: bình có thể nhỏ hơn một ngày đi (cases 5.9)
+        fuel = int(min(day_steps) * rng.uniform(0.5, 3.0))
         busy = rng.randint(1, 5)
-        jam = rng.randint(max(2, busy + 1), 10)
+        # hai ngưỡng có thể bằng nhau: khi đó không có trạng thái đông đúc (cases 8.3)
+        jam = rng.randint(max(2, busy), 10)
         return MatchConfig(
             width=width,
             height=height,
@@ -141,7 +147,9 @@ def generate(
 
 
 def load_or_generate(name: str, seed: int = 0) -> MatchConfig:
-    """'sample_16' -> map chính thức; 'random24' -> map sinh ngẫu nhiên cỡ 24."""
+    """'sample_16' -> map chính thức; 'random24' -> map ngẫu nhiên 24x24;
+    'random8x32' -> rộng 8, cao 32 (map dài và hẹp, cases 6.15); 'random' -> cả rộng
+    lẫn cao đều bốc ngẫu nhiên."""
     import json
     import os
 
@@ -150,8 +158,13 @@ def load_or_generate(name: str, seed: int = 0) -> MatchConfig:
         with open(path, encoding="utf-8") as fh:
             return MatchConfig.from_json(json.load(fh))
     if name.startswith("random"):
-        size = int(name[6:] or 16)
-        return generate(seed=seed, size=size)
+        spec = name[6:]
+        if not spec:
+            return generate(seed=seed)
+        if "x" in spec:
+            width, height = (int(v) for v in spec.split("x", 1))
+            return generate(seed=seed, width=width, height=height)
+        return generate(seed=seed, size=int(spec))
     if os.path.exists(name):
         with open(name, encoding="utf-8") as fh:
             obj = json.load(fh)

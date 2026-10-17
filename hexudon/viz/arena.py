@@ -90,7 +90,8 @@ class _Observer:
 def run_arena(config: MatchConfig, specs: Sequence[BotSpec], emit_for: EmitFor, seed: int = 0,
               role_seconds: float = 3.0) -> MatchOutcome:
     """Chạy trọn trận offline, phát sự kiện qua emit_for(tên bot | None)."""
-    config.players = max(config.players, len(specs))
+    # lưu lượng chia cho số đội thật trong trận (cases 3, 8.8)
+    config.players = len(specs)
     bots = build_bots(config, specs, seed, emit_for, role_seconds)
     emit = emit_for(None)
     emit("match_start", {

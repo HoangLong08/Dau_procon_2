@@ -72,13 +72,22 @@ class TeamState:
     servings: int = 0
     days_submitted: int = 0
     submit_count: int = 0
+    #: tổng thời gian phản hồi của bài hợp lệ cuối cùng mỗi ngày (tiêu chí 4 của đề)
+    response_seconds: float = 0.0
+    #: ngày -> thời gian phản hồi của bài hợp lệ cuối cùng đã nhận trong ngày đó
+    responses: Dict[int, float] = field(default_factory=dict)
 
     def score(self) -> Tuple[int, int, int]:
         return (len(self.brands), self.daily_types, self.servings)
 
+    def rank_key(self):
+        """Thứ tự xếp hạng của đề: L, D, Q, rồi tổng thời gian phản hồi thấp hơn."""
+        return (*self.score(), -self.response_seconds)
+
     def detail(self) -> dict:
         return {"distinct_types": len(self.brands), "cumulative_daily_types": self.daily_types,
-                "total_servings": self.servings, "cumulative_response_time": 0.0,
+                "total_servings": self.servings,
+                "cumulative_response_time": round(self.response_seconds, 3),
                 "missed_selection": self.missed_selection, "days_submitted": self.days_submitted}
 
 
@@ -122,7 +131,9 @@ class Board:
                 team.missed_selection = True
         self.day = 0
 
-    def accept_plan(self, team_id: int, day, plan) -> Tuple[int, dict]:
+    def accept_plan(self, team_id: int, day, plan,
+                    response: Optional[float] = None) -> Tuple[int, dict]:
+        """Nhận bài nếu hợp lệ; `response` là số giây từ lúc mở ngày (contest)."""
         if self.status() != IN_PROGRESS:
             return 409, {"detail": NO_DAY if self.day < 0 else "the match is finished"}
         if day != self.day:
@@ -134,6 +145,9 @@ class Board:
             return 400, {"detail": f"{result.error.code}: {result.error}"}
         team.plans[self.day] = [list(seq) for seq in plan]
         team.submit_count += 1
+        if response is not None:
+            # bài hợp lệ cuối cùng của ngày mới tính thời gian phản hồi
+            team.responses[self.day] = max(0.0, response)
         return 200, {"ok": True, "day": self.day}
 
     def resolve_day(self) -> None:
@@ -156,6 +170,8 @@ class Board:
             team.daily_types += len(result.brands)
             team.servings += result.servings
             team.days_submitted += int(submitted)
+            if submitted:
+                team.response_seconds += team.responses.get(self.day, 0.0)
             entries.append({"team_id": str(team.team_id), "kinds": list(team.kinds),
                             "servings": result.servings, "types": len(result.brands),
                             "submitted": submitted,
@@ -212,7 +228,7 @@ class Board:
         return {"days": days}
 
     def result_payload(self) -> dict:
-        ranked = sorted(self.teams.values(), key=lambda t: t.score(), reverse=True)
+        ranked = sorted(self.teams.values(), key=lambda t: t.rank_key(), reverse=True)
         return {"ranking": [str(t.team_id) for t in ranked],
                 "detail": {str(t.team_id): t.detail() for t in ranked}}
 
@@ -286,7 +302,11 @@ class ContestGame:
         return self.board.set_kinds(team_id, types)
 
     def submit(self, team_id: int, day, plan) -> Tuple[int, dict]:
-        return self.board.accept_plan(team_id, day, plan)
+        response = None
+        if isinstance(day, int) and 0 <= day < len(self.day_ends):
+            opened = self.day_ends[day] - self.config.seconds_of_day(day)
+            response = self.clock() - opened
+        return self.board.accept_plan(team_id, day, plan, response=response)
 
 
 class PracticeGame:

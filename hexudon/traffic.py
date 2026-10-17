@@ -74,11 +74,22 @@ class TrafficForecast:
         own_stay_today: Optional[Dict[int, int]] = None,
         opponents_parked: Optional[Dict[int, int]] = None,
         steps_today: int = 0,
+        own_stay_yesterday: Optional[Dict[int, int]] = None,
+        floor_today: bool = False,
     ) -> Dict[int, int]:
-        """Trạng thái đường dự báo cho ngày mai."""
+        """Trạng thái đường dự báo cho ngày mai.
+
+        Lưu lượng ngày mai gồm vết của hôm nay và hôm qua (cases 2), nên vết đã biết
+        chắc của chính đội ở cả hai ngày đều được cộng (cases 8.13).
+
+        `floor_today=True` khi hôm nay là ngày 2 (day = 1): lưu lượng ngày 3 bằng vết
+        ngày 1 cộng vết ngày 2, còn ngày 2 chỉ có vết ngày 1, nên mọi ô ngày mai ít
+        nhất cũng tệ như hôm nay (cases 10.3).
+        """
         config = self.config
         players = max(1, config.players)
-        own_stay = own_stay_today or {}
+        own_today = own_stay_today or {}
+        own_yesterday = own_stay_yesterday or {}
         parked = opponents_parked or {}
         out: Dict[int, int] = {}
         for cell in config.road_cells:
@@ -86,9 +97,12 @@ class TrafficForecast:
             est = pop * self.expected_passes * self._pass_weight(status_today.get(cell, rules.SMOOTH))
             if status_yesterday is not None:
                 est += pop * self.expected_passes * self._pass_weight(status_yesterday.get(cell, rules.SMOOTH))
-            est += own_stay.get(cell, 0) / players
+            est += (own_today.get(cell, 0) + own_yesterday.get(cell, 0)) / players
             est += parked.get(cell, 0) * steps_today / players
-            out[cell] = rules.road_status_for(est, config.busy_threshold, config.jammed_threshold)
+            status = rules.road_status_for(est, config.busy_threshold, config.jammed_threshold)
+            if floor_today:
+                status = max(status, status_today.get(cell, rules.SMOOTH))
+            out[cell] = status
         return out
 
     def static_guess(self, day_index: int) -> Dict[int, int]:

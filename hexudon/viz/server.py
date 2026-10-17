@@ -2,15 +2,14 @@
 
 Chỉ nghe 127.0.0.1 vì .env chứa token của đội. Mỗi trận là một thư mục trong
 replays/viz/ (meta.json, events-*.jsonl, *.log), nên tắt web rồi mở lại vẫn tua
-được. Bot chạy trong tiến trình riêng (start_new_session) để mỗi bot có trọn một
-lõi CPU như khi thi, và bot chết không kéo web chết theo.
+được. Bot chạy trong tiến trình riêng, nhóm tiến trình riêng (procs.detached_kwargs)
+để mỗi bot có trọn một lõi CPU như khi thi, và bot chết không kéo web chết theo.
 """
 
 import json
 import os
 import re
 import shutil
-import signal
 import socket
 import subprocess
 import sys
@@ -28,6 +27,7 @@ from ..client.web_games import (COMPETITIVE_PRACTICE, PRACTICE, GameRef, Resolve
                                 describe_status, fetch_questions)
 from ..client.web_runner import PROJECT_ROOT, make_api, slug
 from ..offline.bots import BOT_TYPES
+from ..procs import child_env, detached_kwargs, soft_stop
 from .arena import BotSpec
 from .events import EventWriter, read_events
 from .guard import TEST_VAR_RE, GuardError, RunRegistry, allowed_on_real, check_real_game, check_token_var
@@ -156,13 +156,16 @@ class Run:
                 self.server_writer = None
 
     def stop(self) -> str:
-        """Lần 1: Ctrl-C (bot chơi nốt phần đang dở nếu làm được); lần 2: dừng hẳn; lần 3: giết."""
+        """Lần 1: Ctrl-C (bot chơi nốt phần đang dở nếu làm được); lần 2: dừng hẳn; lần 3: giết.
+
+        Ctrl-C tới con qua procs.soft_stop: SIGINT trên POSIX, CTRL_BREAK_EVENT trên Windows.
+        """
         with self.lock:
             self.stop_presses += 1
             alive = [p.popen for p in self.procs if p.popen is not None and p.popen.poll() is None]
             for popen in alive:
                 if self.stop_presses == 1:
-                    popen.send_signal(signal.SIGINT)
+                    soft_stop(popen)
                 elif self.stop_presses == 2:
                     popen.terminate()
                 else:
@@ -364,7 +367,7 @@ class VizApp:
                    "--day-seconds", f"{float(day_seconds):g}"]
             with open(log_path, "a", encoding="utf-8") as fh:
                 self.fake_proc = subprocess.Popen(cmd, stdout=fh, stderr=subprocess.STDOUT, cwd=self.root,
-                                                  env=self._child_env(), start_new_session=True)
+                                                  env=self._child_env(), **detached_kwargs())
             proc = self.fake_proc
         for _ in range(50):
             if port_open(host, port):
@@ -408,9 +411,7 @@ class VizApp:
         return self.targets[name]
 
     def _child_env(self) -> dict:
-        env = dict(os.environ)
-        env["PYTHONPATH"] = self.root + os.pathsep + env.get("PYTHONPATH", "")
-        return env
+        return child_env(self.root)
 
     def _new_run(self, mode: str) -> Tuple[str, str]:
         """Thư mục mới cho một trận; tên theo giờ, thêm số nếu trùng giây."""
@@ -433,7 +434,7 @@ class VizApp:
             log_path = os.path.join(directory, f"{slug(label)}.log")
             with open(log_path, "a", encoding="utf-8") as fh:
                 popen = subprocess.Popen(cmd, stdout=fh, stderr=subprocess.STDOUT, cwd=self.root,
-                                         env=self._child_env(), start_new_session=True)
+                                         env=self._child_env(), **detached_kwargs())
             procs.append(Proc(label, popen, log_path))
         meta = {"id": run_id, "mode": mode, "title": title, "created": time.time(), "request": request,
                 "procs": [{"label": p.label, "log": os.path.basename(p.log_path)} for p in procs]}

@@ -198,6 +198,7 @@ class DayState:
     road_status: Dict[int, int]          # ô đường -> 0/1/2 (ô vắng mặt coi là thông thoáng)
     others: List[List[AgentState]] = field(default_factory=list)
     ends_at: Optional[float] = None      # UNIX time hạn chót, nếu server cấp
+    steps: Optional[int] = None          # số bước của ngày, nếu server báo (/state steps_today)
 
     @staticmethod
     def from_json(obj: dict, kinds: Optional[Sequence[int]] = None,

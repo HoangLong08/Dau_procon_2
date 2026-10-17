@@ -86,10 +86,13 @@ def rollout(
     deadline: Optional[float] = None,
     seconds_per_day: float = 0.0,
     with_days: bool = False,
+    iterations_per_day: int = 0,
 ):
     """Chơi thử cả trận một mình với trạng thái đường dự báo. Trả (L, D, Q).
 
     seconds_per_day = 0 nghĩa là chỉ dùng bộ dựng nghiệm tham lam (tất định, ~5 ms/ngày).
+    `iterations_per_day` > 0 chạy ALNS đúng ngần ấy vòng mỗi ngày thay vì theo giây:
+    tất định, dùng cho benchmark (vẫn dừng ở `deadline` nếu có).
     `with_days=True` trả thêm số ngày thực sự chơi được: một mẫu bị cắt giữa
     chừng KHÔNG so sánh được với mẫu chơi đủ, nên người gọi phải loại nó ra.
     """
@@ -100,18 +103,22 @@ def rollout(
     servings = 0
     status = {c: rules.SMOOTH for c in config.road_cells}
     prev_status = None
+    prev_stay = None
     rng = random.Random(seed)
 
     days_done = 0
     for day in range(config.n_days):
         if deadline is not None and time.monotonic() >= deadline:
             break
-        next_status = forecast.predict(status, prev_status)
+        next_status = forecast.predict(status, prev_status, own_stay_yesterday=prev_stay,
+                                       floor_today=day == 1)
         ctx = make_context(
             config, day, agents, status, [s.stocks for s in config.spots], visited,
             weights=weights, forecast_status=next_status,
         )
-        if seconds_per_day > 0:
+        if iterations_per_day > 0:
+            decoded = plan_day(ctx, deadline=deadline, seed=seed, max_iterations=iterations_per_day)
+        elif seconds_per_day > 0:
             stop = time.monotonic() + seconds_per_day
             if deadline is not None:
                 stop = min(stop, deadline)
@@ -127,8 +134,9 @@ def rollout(
         # dự báo phải nhận HÔM NAY và HÔM QUA; truyền hôm nay hai lần thì
         # công thức hai ngày của luật thành vô nghĩa đúng lúc nó cần nhất
         status, prev_status = forecast.predict(
-            status, prev_status, own_stay_today=result.stay,
-            steps_today=config.steps_of_day(day)), status
+            status, prev_status, own_stay_today=result.stay, own_stay_yesterday=prev_stay,
+            steps_today=config.steps_of_day(day), floor_today=day == 1), status
+        prev_stay = result.stay
         days_done += 1
     score = (len(visited), daily_types, servings)
     return (score, days_done) if with_days else score
@@ -141,10 +149,14 @@ def select_roles(
     seed: int = 0,
     log: Optional[Callable[[str], None]] = None,
     on_candidate: Optional[Callable[[dict], None]] = None,
+    iterations_per_day: Optional[int] = None,
 ) -> Tuple[List[int], List[RoleCandidate]]:
     """Chọn mảng loại xe. Hết giờ vẫn luôn trả về một phương án hợp lệ.
 
     `on_candidate`, nếu có, nhận từng phương án ngay khi được chấm (để web vẽ bảng).
+    `iterations_per_day`, nếu có, bỏ giới hạn giờ: vòng 1 chấm mọi phương án, vòng 2 chạy
+    ALNS đúng ngần ấy vòng mỗi ngày, nên kết quả tất định (benchmark offline, không dùng
+    khi thi vì không chặn theo cửa sổ chọn xe).
     """
     log = log or (lambda msg: None)
 
@@ -154,13 +166,14 @@ def select_roles(
                               phase=phase, **extra))
 
     started = time.monotonic()
-    hard_deadline = started + max(0.2, budget_seconds)
+    deterministic = iterations_per_day is not None
+    hard_deadline = None if deterministic else started + max(0.2, budget_seconds)
     options = candidates(config)
     forecast = TrafficForecast(config, n_patrols=max(1, config.n_agents - 1))
 
     # Vòng 1: rollout tham lam toàn bộ phương án, tất định và rẻ.
     for cand in options:
-        if time.monotonic() >= hard_deadline:
+        if hard_deadline is not None and time.monotonic() >= hard_deadline:
             break
         cand.score, days_done = rollout(config, cand.kinds, forecast, weights=weights,
                                         seed=seed, deadline=hard_deadline, with_days=True)
@@ -179,8 +192,21 @@ def select_roles(
         return list(fallback.kinds), options
 
     # Vòng 2: nếu còn thời gian, đánh giá lại hai phương án dẫn đầu bằng ALNS thật.
-    remaining = hard_deadline - time.monotonic()
     finalists = ranked[:2]
+    if deterministic:
+        if len(finalists) > 1:
+            for cand in finalists:
+                cand.refined = rollout(config, cand.kinds, forecast, weights=weights, seed=seed,
+                                       iterations_per_day=iterations_per_day)
+                log(f"tinh chỉnh {cand.label}: L={cand.refined[0]} D={cand.refined[1]} Q={cand.refined[2]}")
+                tell(cand, "refine", cand.refined)
+            best = max(finalists, key=lambda c: c.best())
+        else:
+            best = ranked[0]
+        log(f"chọn: {best.label}")
+        return list(best.kinds), options
+
+    remaining = hard_deadline - time.monotonic()
     if remaining > 1.0 and len(finalists) > 1:
         per_candidate = remaining / len(finalists)
         per_day = max(0.05, per_candidate / max(1, config.n_days))

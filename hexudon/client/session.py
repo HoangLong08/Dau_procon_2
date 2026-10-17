@@ -10,7 +10,7 @@ from ..model import DayState, MatchConfig
 from ..planner.decoder import Decoded
 from ..planner.solution import Weights
 from ..planner.strategy import DEFAULT_ROLE_SECONDS, MatchStrategist
-from ..simulator import wait_plan
+from ..simulator import idle_plan, wait_plan
 from .transport import MatchEnded, SelectionWindow, Transport
 
 WATCHDOG_SECONDS = 1.5
@@ -160,19 +160,24 @@ class MatchSession:
         total = self.config.n_days if self.config is not None else "?"
         return f"Ngày {day + 1}/{total}"
 
-    def steps_for(self, day: int) -> int:
-        """Số bước của ngày, đã tính tới khả năng server đánh số ngày từ 1."""
+    def steps_for(self, state: DayState) -> int:
+        """Số bước của ngày. Server báo (steps_today) là chuẩn; không có thì theo
+        daySteps, đã tính tới khả năng server đánh số ngày từ 1."""
         assert self.config is not None
-        return self.config.steps_of_day(day + self.day_offset)
+        if state.steps:
+            return int(state.steps)
+        return self.config.steps_of_day(state.day + self.day_offset)
 
     def maybe_fix_day_indexing(self, ack, state: DayState) -> None:
         """Server đánh số ngày từ 1 sẽ làm tổng số bước sai và bài bị từ chối.
 
-        Nhận ra qua mã lỗi E_STEP_OVERFLOW ngay lần gửi đầu, rồi lùi chỉ số ngày
-        một đơn vị cho phần còn lại của trận.
+        Theo Formats ngày đầu có day = 0, và server web báo luôn số bước của ngày,
+        nên chỉ đoán khi server không báo số bước (PTIT, sandbox): nhận ra qua mã
+        lỗi E_STEP_OVERFLOW ngay lần gửi đầu, rồi lùi chỉ số ngày một đơn vị cho
+        phần còn lại của trận. Đoán nhầm sẽ làm sai số bước mọi ngày sau.
         """
         assert self.config is not None
-        if self.day_offset != 0 or not ack.reason:
+        if state.steps or self.day_offset != 0 or not ack.reason:
             return
         if "STEP" not in str(ack.reason).upper():
             return
@@ -184,7 +189,10 @@ class MatchSession:
     def play_day(self, state: DayState) -> Optional[Decoded]:
         assert self.strategist is not None and self.config is not None
         started = time.monotonic()
-        steps = self.steps_for(state.day)
+        steps = self.steps_for(state)
+        if state.steps and state.steps != self.config.steps_of_day(state.day):
+            self.log(f"{self.day_label(state.day)}: server báo {state.steps} bước, daySteps ghi "
+                     f"{self.config.steps_of_day(state.day)}; theo server")
         budget = self.strategist.budget_for(state)
         deadline = started + budget
         #: hạn cứng của ngày theo đồng hồ đơn điệu; mọi lần gửi phải nằm trong đó
@@ -221,42 +229,71 @@ class MatchSession:
             return ack.ok
 
         resubmit = getattr(self.transport, "supports_resubmit", True)
+        decoded = None
         try:
+            # bộ nhớ trận ghi SAU khi biết server đã nhận bài nào (_remember), không ghi ở đây
             decoded = self.strategist.plan_day(
                 state, deadline=deadline, submit=submit if resubmit else None,
-                steps_override=steps,
+                steps_override=steps, record=False,
             )
             if not resubmit:
                 # kênh chỉ nhận một dòng trả lời cho mỗi ngày: gửi đúng bài tốt nhất
                 submit(decoded.plan)
         except Exception as exc:
-            # planner hỏng thì ngày này chơi bài đứng yên, nhưng trận vẫn tiếp
+            # planner hỏng thì ngày này chơi bài dự phòng, nhưng trận vẫn tiếp
             self.log(f"{self.day_label(state.day)}: planner lỗi {exc!r}")
             if not sent["ok"]:
-                submit(wait_plan(self.config.n_agents, self.steps_for(state.day)))
+                self._send_fallback(state, submit)
+            self._remember(state, accepted["plan"], decoded)
             self._emit_day_result(state, accepted["plan"])
             return None
 
         if sent["count"] == 0 or not sent["ok"]:
-            self.log(f"{self.day_label(state.day)}: chưa có bài nào được nhận, gửi bài đứng yên")
-            submit(wait_plan(self.config.n_agents, self.steps_for(state.day)))
+            self.log(f"{self.day_label(state.day)}: chưa có bài nào được nhận, gửi bài dự phòng")
+            self._send_fallback(state, submit)
 
         if not sent["ok"] and self.day_offset != 0:
             # đã phát hiện lệch cách đánh số ngày: lập lại kế hoạch với số bước đúng
-            self.log(f"{self.day_label(state.day)}: lập lại kế hoạch với {self.steps_for(state.day)} bước")
+            self.log(f"{self.day_label(state.day)}: lập lại kế hoạch với {self.steps_for(state)} bước")
             decoded = self.strategist.plan_day(
                 state, deadline=time.monotonic() + max(0.2, deadline - time.monotonic()),
-                submit=None, steps_override=self.steps_for(state.day),
+                submit=None, steps_override=self.steps_for(state), record=False,
             )
             submit(decoded.plan)
 
+        applied = self._remember(state, accepted["plan"], decoded) or decoded
         self._emit_day_result(state, accepted["plan"])
         elapsed = time.monotonic() - started
         self.log(
-            f"{self.day_label(state.day)}: {len(decoded.result.brands)} loại, {decoded.result.servings} phần, "
+            f"{self.day_label(state.day)}: {len(applied.result.brands)} loại, {applied.result.servings} phần, "
             f"gửi {sent['count']} lần, {elapsed:.2f}s (ngân sách {budget:.2f}s)"
         )
-        return decoded
+        return applied
+
+    def _send_fallback(self, state: DayState, submit: Callable[[List[List[int]]], bool]) -> None:
+        """Bài dự phòng khi chưa có bài nào được nhận: rời ô đường rồi đứng yên (cases 11.4).
+
+        Bị từ chối thì gửi bài đứng yên thuần, cách hiểu luật nào cũng nhận.
+        """
+        assert self.config is not None
+        plan = idle_plan(self.config, state.agents, self.steps_for(state), state.road_status)
+        if submit(plan):
+            return
+        fallback = wait_plan(self.config.n_agents, self.steps_for(state))
+        if fallback != plan:
+            submit(fallback)
+
+    def _remember(self, state: DayState, plan: Optional[List[List[int]]],
+                  decoded: Optional[Decoded]) -> Optional[Decoded]:
+        """Ghi vào bộ nhớ trận đúng bài server đang áp dụng: bài hợp lệ cuối cùng nó
+        nhận, hoặc đứng yên cả ngày nếu không nhận bài nào (cases 11.3, 11.4)."""
+        assert self.strategist is not None
+        try:
+            return self.strategist.record_applied(state, plan, self.steps_for(state),
+                                                  known=(decoded, self.strategist.last_sent))
+        except Exception as exc:
+            self.log(f"{self.day_label(state.day)}: không ghi được bộ nhớ ngày ({exc!r})")
+            return None
 
     def _emit_day_result(self, state: DayState, plan: Optional[List[List[int]]]) -> None:
         """Mô phỏng bài được nhận cuối cùng để web vẽ lại từng bước; điểm thật vẫn là của server."""
@@ -264,7 +301,7 @@ class MatchSession:
             return
         from ..viz.shapes import simulate
 
-        steps = self.steps_for(state.day)
+        steps = self.steps_for(state)
         applied = plan if plan is not None else wait_plan(self.config.n_agents, steps)
         result, trace = simulate(self.config, state.agents, applied, steps,
                                  [s.stocks for s in self.config.spots], state.road_status)

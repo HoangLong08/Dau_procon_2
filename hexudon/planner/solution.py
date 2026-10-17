@@ -44,14 +44,17 @@ class DaySolution:
 class Weights:
     """Trọng số hàm mục tiêu. B là đơn vị 'một loại udon trong ngày'."""
     B: float = 1000.0
-    new_brand: float = 0.5          # × B, cho loại chưa từng thu trong trận
+    new_brand: float = 0.5          # × B, cho loại chưa từng thu trong trận; luôn bị nâng
+                                    # lên ít nhất (số chuỗi + 1), xem DayContext.new_brand_value
     serving: float = 1.0            # tuyệt đối, phải nhỏ hơn B
     cover_penalty: float = 1000.0   # × B, chuỗi không thể ghé kịp phần trận còn lại
     urgency: float = 0.6            # × B
     end_on_spot: float = 0.5        # × B
     near_chain: float = 0.4         # × B
     strand: float = 0.8             # × B × số ngày còn lại
-    fuel_bonus: float = 0.2         # × B, theo tỉ lệ xăng còn lại
+    # × B, theo tỉ lệ xăng còn lại. 0,2 cũ định giá xăng quá thấp: `ab` 54 trận nhiều đội
+    # (07/10/2026) cho 1,0 hơn 0,2 +1,5 ± 1,0 D mỗi trận; 2,0 ngang 1,0 nhưng có trận thua đậm
+    fuel_bonus: float = 1.0
     road_park: float = 0.05         # × B, phạt stay-step trên đường của chính mình
     diag_penalty: float = 0.01      # × B, phạt tour bị cắt / điểm hẹn bị bỏ
 
@@ -91,6 +94,16 @@ class DayContext:
             else:
                 cost.append(rules.step_cost(terrain))
         self.step_cost_of = cost
+
+    @property
+    def new_brand_value(self) -> float:
+        """Điểm thưởng cho mỗi loại udon mới cả trận (tiêu chí 1, L).
+
+        Một ngày chỉ thêm được tối đa (số chuỗi) × B cho D, nên thưởng L phải lớn
+        hơn mức đó: một loại mới luôn hơn mọi số loại đã có (L > D > Q, cases 9.7).
+        """
+        w = self.weights
+        return w.B * max(w.new_brand, len(self.config.brands) + 1)
 
     @property
     def n_patrols(self) -> int:

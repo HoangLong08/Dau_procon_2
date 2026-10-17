@@ -1,14 +1,14 @@
 """Điều phối lập kế hoạch một ngày: dựng ngữ cảnh, bài an toàn, rồi ALNS."""
 
 import time
-from typing import Callable, Dict, List, Optional, Sequence, Set
+from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from ..model import AgentState, MatchConfig
 from ..pathing import DayGraph, DistTable, LegBook
 from .alns import improve
 from .construct import construct
 from .decoder import Decoded, decode
-from .solution import DayContext, Weights, build_context
+from .solution import DayContext, DaySolution, Weights, build_context
 
 
 def make_context(
@@ -46,11 +46,17 @@ def make_context(
     )
 
 
-def safe_plan(ctx: DayContext, seed: int = 0) -> Decoded:
-    """Bài an toàn: dựng tham lam một lần, luôn hợp lệ, gửi ngay."""
+def safe_solution(ctx: DayContext, seed: int = 0) -> Tuple[DaySolution, Decoded]:
+    """Nghiệm an toàn và bài giải mã của nó: dựng tham lam một lần, luôn hợp lệ."""
     import random
 
-    return decode(ctx, construct(ctx, random.Random(seed)))
+    sol = construct(ctx, random.Random(seed))
+    return sol, decode(ctx, sol)
+
+
+def safe_plan(ctx: DayContext, seed: int = 0) -> Decoded:
+    """Bài an toàn: dựng tham lam một lần, luôn hợp lệ, gửi ngay."""
+    return safe_solution(ctx, seed)[1]
 
 
 def plan_day(
@@ -61,14 +67,19 @@ def plan_day(
     max_iterations: int = 1_000_000,
     on_better: Optional[Callable[[Decoded], None]] = None,
     on_progress: Optional[Callable[[dict], None]] = None,
+    on_improve: Optional[Callable[[Decoded], None]] = None,
 ) -> Decoded:
     """Lập kế hoạch một ngày: gửi bài an toàn trước, rồi cải thiện tới hạn chót.
 
-    on_plan được gọi mỗi khi có kế hoạch tốt hơn đáng để gửi đi. Hai móc còn lại
-    chỉ để quan sát: on_better nhận mọi nghiệm ALNS tốt hơn hẳn mọi nghiệm trước
-    đó (kể cả bài an toàn); on_progress chuyển thẳng cho ALNS.
+    on_plan được gọi với bài an toàn, rồi với bài cuối nếu nó tốt hơn bài an toàn.
+    on_improve được gọi ngay khi ALNS tìm ra nghiệm tốt hơn hẳn mọi nghiệm trước
+    đó, để bên gọi tự quyết có gửi sớm không: thời gian phản hồi tính theo bài
+    hợp lệ cuối cùng (cases 11.8). Hai móc còn lại chỉ để quan sát: on_better
+    nhận đúng các nghiệm như on_improve; on_progress chuyển thẳng cho ALNS.
+
+    ALNS bắt đầu từ chính nghiệm an toàn, nên bài cuối không bao giờ kém nó.
     """
-    first = safe_plan(ctx, seed)
+    sol, first = safe_solution(ctx, seed)
     if on_plan is not None:
         on_plan(first)
     if deadline is not None and time.monotonic() >= deadline:
@@ -80,10 +91,12 @@ def plan_day(
             best_seen["score"] = decoded.score
             if on_better is not None:
                 on_better(decoded)
+            if on_improve is not None:
+                on_improve(decoded)
 
     result = improve(
         ctx,
-        start=None,
+        start=sol,
         deadline=deadline,
         max_iterations=max_iterations,
         seed=seed,

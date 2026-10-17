@@ -15,6 +15,12 @@ Pha phản ánh xử lý đúng thứ tự:
 
 Một đội được mô phỏng độc lập với đội khác: kho riêng, tiếp nhiên liệu chỉ trong
 đội, đi chung ô là hợp lệ. Giao thông cộng dồn giữa các đội nằm ở tầng trên.
+
+Xăng được kiểm và trừ lúc bước đi hoàn tất, sau mọi lần nạp trong lúc đi: ví dụ
+chính thức có xe A nhận lệnh rời ô đường khi chỉ còn 1 xăng, được xe tiếp nạp
+giữa chừng, và bài vẫn hợp lệ. Câu chữ của đề ("đưa ra chỉ dẫn di chuyển khi
+không đủ nhiên liệu → không hợp lệ", cases 7.2, 11.9) đọc chặt hơn; `strict_fuel`
+kiểm thêm lúc nhận lệnh để bài của ta hợp lệ theo cả hai cách hiểu.
 """
 
 from dataclasses import dataclass, field
@@ -74,12 +80,17 @@ def run_day(
     stocks: Sequence[int],
     road_status: Optional[Dict[int, int]] = None,
     trace: Optional[list] = None,
+    strict_fuel: bool = False,
 ) -> DayResult:
     """Chạy một ngày cho MỘT đội. Trả DayResult; ok=False kèm lỗi đầu tiên gặp phải.
 
     `trace`, nếu có, nhận (bước, vị trí, nhiên liệu) ở bước 0 và sau pha phản
     ánh của mỗi bước 1..N — đúng các frame replay server gửi cho đội mình.
     Không đổi kết quả.
+
+    `strict_fuel=True` còn đòi xe tuần tra đủ xăng ngay lúc NHẬN lệnh đi, không
+    trông vào xe tiếp tới nạp trong lúc đang đi. Planner bật nó; server giả,
+    đối chiếu replay và golden test giữ mặc định đúng ví dụ chính thức.
     """
     n = len(agents)
     err = _normalise_plan(plan, n)
@@ -138,6 +149,11 @@ def run_day(
             return PlanError(rules.E_POND, i, k, t, f"đang ở ao {src}")
         if t + cost > steps:
             return PlanError(rules.E_STEP_OVERFLOW, i, k, t, f"cần {cost} bước, còn {steps - t}")
+        if strict_fuel and kind[i] == rules.PATROL:
+            need = rules.fuel_cost(cells[src])
+            if fuel[i] < need:
+                return PlanError(rules.E_NO_FUEL, i, k, t,
+                                 f"lúc nhận lệnh cần {need}, còn {fuel[i]} tại ô {src}")
         pending[i] = (t + cost, dst, src, k, t)
         return None
 
@@ -221,14 +237,60 @@ def run_day(
     )
 
 
-def validate(config, steps, agents, plan, stocks, road_status=None) -> Optional[PlanError]:
+def validate(config, steps, agents, plan, stocks, road_status=None,
+             strict_fuel: bool = False) -> Optional[PlanError]:
     """Chỉ kiểm hợp lệ, bỏ kết quả."""
-    return run_day(config, steps, agents, plan, stocks, road_status).error
+    return run_day(config, steps, agents, plan, stocks, road_status, strict_fuel=strict_fuel).error
 
 
 def wait_plan(n_agents: int, steps: int) -> List[List[int]]:
     """Kế hoạch đứng yên cả ngày: luôn hợp lệ."""
     return [[-steps] for _ in range(n_agents)]
+
+
+def compact_plan(plan: Sequence[Sequence[int]]) -> List[List[int]]:
+    """Gộp các lệnh chờ liền nhau: [-3, -5] thành [-8]. Kết quả mô phỏng không đổi.
+
+    Theo Formats, -15 là chờ 15 bước, nên không cần gửi nhiều lệnh chờ rời (cases 11.5).
+    """
+    out: List[List[int]] = []
+    for seq in plan:
+        merged: List[int] = []
+        for tok in seq:
+            if tok < 0 and merged and merged[-1] < 0:
+                merged[-1] += tok
+            else:
+                merged.append(tok)
+        out.append(merged)
+    return out
+
+
+def idle_plan(config: MatchConfig, agents: Sequence[AgentState], steps: int,
+              road_status: Optional[Dict[int, int]] = None) -> List[List[int]]:
+    """Bài dự phòng: đứng yên cả ngày, trừ xe đang ở ô đường thì bước sang ô kề trước.
+
+    Đứng cả ngày trên ô đường để lại `steps` bước lưu lượng, đủ làm ô đó tắc hai
+    ngày sau (cases 11.4, 7.10). Xe sang ô đồng bằng kề bên, không có thì ô núi,
+    nếu đủ bước và (xe tuần tra) đủ xăng. Bài được kiểm chặt; sai thì trả wait_plan.
+    """
+    road_status = road_status or {}
+    plan: List[List[int]] = []
+    for agent in agents:
+        seq = [-steps]
+        if config.cells[agent.pos] == rules.ROAD:
+            cost = rules.STEP_ROAD[road_status.get(agent.pos, rules.SMOOTH)]
+            fuel_ok = agent.kind != rules.PATROL or agent.fuel >= rules.FUEL_ROAD
+            best = None
+            for direction, nb in enumerate(config.neighbors[agent.pos]):
+                rank = {rules.PLAIN: 0, rules.MOUNTAIN: 1}.get(config.cells[nb]) if nb >= 0 else None
+                if rank is not None and (best is None or rank < best[0]):
+                    best = (rank, direction)
+            if best is not None and fuel_ok and cost <= steps:
+                seq = [best[1]] + ([-(steps - cost)] if steps > cost else [])
+        plan.append(seq)
+    check = run_day(config, steps, agents, plan, [s.stocks for s in config.spots], road_status,
+                    strict_fuel=True)
+    return plan if check.ok else wait_plan(len(agents), steps)
 
 
 def road_status_from_history(config: MatchConfig, stay_history: Sequence[Dict[int, int]]) -> Dict[int, int]:

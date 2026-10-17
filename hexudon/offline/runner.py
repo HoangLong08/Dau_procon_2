@@ -19,10 +19,16 @@ class TeamRecord:
     servings: int = 0
     invalid_days: int = 0
     plan_seconds: List[float] = field(default_factory=list)
+    #: tổng thời gian phản hồi của bài hợp lệ cuối cùng mỗi ngày (tiêu chí 4 của đề)
+    response_seconds: float = 0.0
     agents: List[AgentState] = field(default_factory=list)
 
     def score(self):
         return (len(self.brands), self.daily_types, self.servings)
+
+    def rank_key(self):
+        """Thứ tự xếp hạng của đề: L, rồi D, rồi Q, rồi tổng thời gian phản hồi thấp hơn."""
+        return (*self.score(), -self.response_seconds)
 
 
 @dataclass
@@ -32,7 +38,7 @@ class MatchOutcome:
     forecast_accuracy: List[dict] = field(default_factory=list)
 
     def ranking(self) -> List[TeamRecord]:
-        return sorted(self.teams, key=lambda t: t.score(), reverse=True)
+        return sorted(self.teams, key=lambda t: t.rank_key(), reverse=True)
 
     def winner(self) -> TeamRecord:
         return self.ranking()[0]
@@ -69,11 +75,14 @@ def run_match(config: MatchConfig, bots: Sequence, log=None, collect_forecast=Fa
             observer.day_start(day, steps, status, records)
         combined: Dict[int, int] = {}
         day_entry = {"day": day, "steps": steps, "teams": []}
+        # mọi đội thấy cùng một ảnh vị trí ĐẦU ngày như server thật (cases 8.11), không
+        # phải vị trí cuối ngày của những đội đã được chấm trước trong vòng lặp này
+        snapshot = [[AgentState(a.kind, a.pos, a.fuel) for a in rec.agents] for rec in records]
 
         for idx, (bot, rec) in enumerate(zip(bots, records)):
             others = [
-                [AgentState(o.kind, o.pos, o.fuel) for o in other.agents]
-                for j, other in enumerate(records) if j != idx
+                [AgentState(o.kind, o.pos, o.fuel) for o in team]
+                for j, team in enumerate(snapshot) if j != idx
             ]
             state = DayState(day=day, agents=[AgentState(a.kind, a.pos, a.fuel) for a in rec.agents],
                              road_status=dict(status), others=others, ends_at=None)
@@ -85,6 +94,10 @@ def run_match(config: MatchConfig, bots: Sequence, log=None, collect_forecast=Fa
                 plan = None
             elapsed = time.monotonic() - t0
             rec.plan_seconds.append(elapsed)
+            # thời gian phản hồi là lúc gửi bài cuối cùng (bot search tự báo), không phải
+            # lúc nghĩ xong; ngày không có bài hợp lệ thì không cộng gì, như server thật
+            answered = getattr(bot, "last_response_seconds", None)
+            response = 0.0
 
             stocks = [s.stocks for s in config.spots]
             result = None
@@ -97,6 +110,9 @@ def run_match(config: MatchConfig, bots: Sequence, log=None, collect_forecast=Fa
                     rec.invalid_days += 1
                     error = result.error
                     result = None
+                else:
+                    response = answered if answered is not None else elapsed
+            rec.response_seconds += response
             if result is None:
                 trace = [] if observer is not None else None
                 result = run_day(config, steps, rec.agents, wait_plan(config.n_agents, steps),
@@ -118,6 +134,7 @@ def run_match(config: MatchConfig, bots: Sequence, log=None, collect_forecast=Fa
                 "types": len(result.brands),
                 "servings": result.servings,
                 "seconds": round(elapsed, 3),
+                "response": round(response, 3),
             })
 
         stay_history.append(combined)

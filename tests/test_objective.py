@@ -94,5 +94,59 @@ class ObjectiveTest(unittest.TestCase):
                            score_day(seen, FakeResult(seen)) - end_value(seen, FakeResult(seen)))
 
 
+class FakeDay:
+    """Kết quả ngày giả: chỉ những trường hàm mục tiêu đọc."""
+
+    def __init__(self, ctx, brands=(), servings=0, end_pos=None, end_fuel=None):
+        self.brands = set(brands)
+        self.servings = servings
+        self.end_pos = list(end_pos) if end_pos is not None else [a.pos for a in ctx.agents]
+        self.end_fuel = list(end_fuel) if end_fuel is not None else [a.fuel for a in ctx.agents]
+        self.stay = {}
+
+
+class LexicographicOrderTest(unittest.TestCase):
+    """Tiêu chí 1 (L) phải thắng mọi phần của tiêu chí 2 (D) trong ngày (cases 9.7, 10.8)."""
+
+    def test_one_new_type_beats_every_type_already_seen(self):
+        config = small_config(days=3)
+        for day in (0, 2):                     # cả ngày đầu lẫn ngày cuối
+            ctx = context(config, day=day, visited=frozenset({0, 1}))
+            new_only = FakeDay(ctx, brands={2}, servings=1)
+            old_ones = FakeDay(ctx, brands={0, 1}, servings=config.n_agents * len(config.spots))
+            self.assertGreater(score_day(ctx, new_only) - end_value(ctx, new_only),
+                               score_day(ctx, old_ones) - end_value(ctx, old_ones),
+                               f"ngày {day}: 1 loại mới phải hơn {len(old_ones.brands)} loại đã có")
+
+    def test_new_type_bonus_exceeds_a_full_day_of_daily_types(self):
+        ctx = context(small_config())
+        self.assertGreater(ctx.new_brand_value, len(ctx.config.brands) * ctx.weights.B)
+
+
+class StrandedFuelTest(unittest.TestCase):
+    """Xăng tính theo ô ĐANG ĐỨNG: còn 1 xăng trên đường là kẹt, trên đồng bằng thì không (cases 7.11)."""
+
+    def setUp(self):
+        self.config = small_config(days=3)
+        # không có xe tiếp, để phạt kẹt xăng không bị xe tiếp ở gần xoá đi
+        self.ctx = context(self.config, kinds=[rules.PATROL] * 3)
+        self.penalty = self.ctx.weights.strand * self.ctx.weights.B * self.ctx.days_left
+
+    def value_at(self, cell, fuel):
+        ends = [cell, 6, 9]
+        fuels = [fuel, self.config.fuel_limits, self.config.fuel_limits]
+        return end_value(self.ctx, FakeDay(self.ctx, end_pos=ends, end_fuel=fuels))
+
+    def test_one_fuel_on_a_road_cell_is_stranded_even_next_to_a_plain(self):
+        road = 8                               # ô đường, kề ô đồng bằng 1, 2, 9
+        self.assertEqual(self.config.cells[road], rules.ROAD)
+        self.assertGreater(self.value_at(road, 2) - self.value_at(road, 1), 0.99 * self.penalty)
+
+    def test_one_fuel_on_a_plain_cell_is_not_stranded(self):
+        plain = 3
+        self.assertEqual(self.config.cells[plain], rules.PLAIN)
+        self.assertLess(self.value_at(plain, 2) - self.value_at(plain, 1), 0.5 * self.penalty)
+
+
 if __name__ == "__main__":
     unittest.main()

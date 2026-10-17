@@ -7,13 +7,17 @@ Ba tính chất:
      planner luôn khớp tuyệt đối với luật.
   3. Nếu vì lý do nào đó kế hoạch vẫn sai, hàm repair cắt đúng agent gây lỗi
      rồi thử lại, nên đầu ra không bao giờ là bài không hợp lệ.
+
+Bài được kiểm theo cách hiểu chặt của đề (strict_fuel): xe tuần tra phải đủ xăng
+ngay lúc nhận lệnh đi, nên xe tiếp phải tới điểm hẹn TRƯỚC khi xe tuần tra rời ô.
+Bài như vậy hợp lệ cả khi server kiểm xăng lúc nhận lệnh lẫn lúc đi xong.
 """
 
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from .. import rules
-from ..simulator import DayResult, run_day
+from ..simulator import DayResult, compact_plan, run_day
 from .objective import score_day
 from .solution import DayContext, DaySolution, Meet
 
@@ -150,12 +154,14 @@ def _window(ctx: DayContext, walk: PatrolWalk, sol: DaySolution, slot: int, stop
     if stop_idx == -1:
         return cell, 0, max(0, waits.get((slot, -1), 1) - 1) if waits.get((slot, -1), 1) > 0 else 0
     tour = sol.tours[slot]
-    is_last = stop_idx >= len(tour) - 1 or (stop_idx + 1) not in walk.arrivals
+    # điểm dừng cuối mà xe tuần tra không rời đi nữa: xe tiếp tới lúc nào trong ngày cũng được
+    is_last = ((stop_idx >= len(tour) - 1 or (stop_idx + 1) not in walk.arrivals)
+               and walk.end_cell == cell)
     if is_last:
         return cell, start, ctx.steps
-    wait = waits.get((slot, stop_idx), 0)
-    depart_cost = ctx.step_cost_of[cell]
-    return cell, start, start + wait + max(1, depart_cost) - 1
+    # còn đi tiếp: xe tiếp phải tới trước khi xe tuần tra nhận lệnh rời ô, vì
+    # thiếu xăng lúc nhận lệnh có thể làm cả bài bị loại (cases 7.2, 7.7, 11.9)
+    return cell, start, start + waits.get((slot, stop_idx), 0)
 
 
 def route_cars(ctx: DayContext, sol: DaySolution, walks: List[PatrolWalk],
@@ -239,7 +245,11 @@ def route_cars(ctx: DayContext, sol: DaySolution, walks: List[PatrolWalk],
             needy = min(range(len(walks)), key=lambda s: walks[s].end_fuel)
             target = walks[needy].end_cell
             if target != cur:
-                path = ctx.dist_step.path(cur, target)
+                path = list(ctx.dist_step.path(cur, target))
+                # không đỗ trên ô đường tới hết ngày: mỗi bước chờ ở đó là một bước
+                # lưu lượng, đủ làm tắc đường của chính mình (cases 7.5, 7.10)
+                while path and ctx.config.cells[path[-1]] == rules.ROAD:
+                    path.pop()
                 moved, cur, used = _emit_path(ctx, cur, path, ctx.steps - t)
                 tokens.extend(moved)
                 t += used
@@ -289,10 +299,11 @@ def build_plan(ctx: DayContext, sol: DaySolution):
 
 
 def repair_to_valid(ctx: DayContext, plan: List[List[int]]) -> Tuple[List[List[int]], DayResult, int]:
-    """Chạy simulator; nếu sai thì cắt đúng agent gây lỗi rồi thử lại."""
+    """Chạy simulator (kiểm xăng chặt); nếu sai thì cắt đúng agent gây lỗi rồi thử lại."""
     cuts = 0
     for _ in range(len(ctx.agents) * 4 + 4):
-        result = run_day(ctx.config, ctx.steps, ctx.agents, plan, ctx.stocks, ctx.road_status)
+        result = run_day(ctx.config, ctx.steps, ctx.agents, plan, ctx.stocks, ctx.road_status,
+                         strict_fuel=True)
         if result.ok:
             return plan, result, cuts
         err = result.error
@@ -320,6 +331,7 @@ def decode(ctx: DayContext, sol: DaySolution) -> Decoded:
     """Giải mã nghiệm thành kế hoạch hợp lệ kèm điểm."""
     plan, truncated, dropped = build_plan(ctx, sol)
     plan, result, cuts = repair_to_valid(ctx, plan)
+    plan = compact_plan(plan)
     if not result.ok:
         # không sửa nổi thành bài hợp lệ: chấm điểm nó sẽ nổ IndexError vì
         # end_pos rỗng. Trả điểm tệ nhất để ALNS không bao giờ chọn nghiệm này.

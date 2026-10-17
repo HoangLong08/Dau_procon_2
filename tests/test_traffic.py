@@ -63,6 +63,25 @@ class ForecastTest(unittest.TestCase):
         day3 = forecast.static_guess(3)
         self.assertLessEqual(day1[2], day3[2], "đường chỉ xấu đi hoặc giữ nguyên theo ngày")
 
+    def test_own_trace_of_yesterday_counts_for_tomorrow(self):
+        """Lưu lượng ngày mai = vết hôm nay + vết hôm qua (cases 2, 8.13)."""
+        config = corridor_config(players=1, busy=1, jam=3)
+        forecast = TrafficForecast(config, pop={c: 0.0 for c in config.road_cells})
+        self.assertEqual(forecast.predict({})[2], rules.SMOOTH)
+        self.assertEqual(forecast.predict({}, own_stay_yesterday={2: 1})[2], rules.CONGESTED)
+        both = forecast.predict({}, own_stay_today={2: 1}, own_stay_yesterday={2: 2})
+        self.assertEqual(both[2], rules.JAMMED, "1 + 2 bước của chính đội, chia 1 đội = 3")
+
+    def test_day_three_is_never_better_than_day_two(self):
+        """Ngày 3 = vết ngày 1 + ngày 2, ngày 2 chỉ có vết ngày 1 (cases 10.3)."""
+        config = corridor_config(players=4, busy=1, jam=3)
+        forecast = TrafficForecast(config, pop={c: 0.0 for c in config.road_cells})
+        today = {1: rules.SMOOTH, 2: rules.JAMMED, 3: rules.CONGESTED}
+        self.assertEqual(forecast.predict(today)[2], rules.SMOOTH, "không có sàn thì dự báo quên mất ô tắc")
+        floored = forecast.predict(today, floor_today=True)
+        self.assertEqual([floored[c] for c in (1, 2, 3)],
+                         [rules.SMOOTH, rules.JAMMED, rules.CONGESTED])
+
     def test_accuracy_counts_optimistic_errors(self):
         predicted = {1: rules.SMOOTH, 2: rules.JAMMED, 3: rules.CONGESTED}
         actual = {1: rules.JAMMED, 2: rules.JAMMED, 3: rules.CONGESTED}

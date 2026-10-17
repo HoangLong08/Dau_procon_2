@@ -60,16 +60,13 @@ def end_value(ctx: DayContext, result: DayResult) -> float:
                 near += 1
         value += w.near_chain * B * near
 
-    # V_fuel: xe kẹt xăng nhiều ngày; thích kết thúc đầy bình
+    # V_fuel: xe kẹt xăng nhiều ngày; thích kết thúc đầy bình. Xăng tính theo ô
+    # ĐANG ĐỨNG: còn 1 xăng trên núi hoặc đường là kẹt, trên đồng bằng thì chưa (cases 7.11)
     table = ctx.dist_next or ctx.dist_step
     for agent in ctx.patrols:
         cell = end_pos[agent]
         fuel = end_fuel[agent]
-        cheapest_move = min(
-            (rules.fuel_cost(cfg.cells[n]) for n in cfg.neighbors[cell] if n >= 0 and cfg.cells[n] != rules.POND),
-            default=1,
-        )
-        if fuel < cheapest_move:
+        if fuel < rules.fuel_cost(cfg.cells[cell]):
             car_dist = min((table.cost(cell, cc) for cc in car_cells), default=INF)
             if car_dist == INF or car_dist > 0.5 * max(1, ctx.next_steps):
                 value -= w.strand * B * ctx.days_left
@@ -82,13 +79,13 @@ def end_value(ctx: DayContext, result: DayResult) -> float:
 
 
 def score_day(ctx: DayContext, result: DayResult, truncated: int = 0, dropped_meets: int = 0) -> float:
-    """Điểm tổng của một kế hoạch ngày."""
+    """Điểm tổng của một kế hoạch ngày: L trước, rồi D, rồi Q (cases 9.7)."""
     w = ctx.weights
     B = w.B
     daily_brands = result.brands
     new_brands = len(daily_brands - ctx.visited_brands)
     score = B * len(daily_brands)
-    score += w.new_brand * B * new_brands
+    score += ctx.new_brand_value * new_brands
     score += w.serving * result.servings
     score += end_value(ctx, result)
     score -= w.diag_penalty * B * (truncated + dropped_meets)

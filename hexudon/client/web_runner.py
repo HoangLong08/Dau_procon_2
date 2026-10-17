@@ -14,6 +14,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
+from ..procs import child_env, detached_kwargs
 from .net import JsonHttp
 from .session import MatchSession, ReplayWriter
 from .tokens import TeamToken
@@ -195,8 +196,9 @@ class Child:
 class Supervisor:
     """Giữ các tiến trình con. Ctrl-C lần 1 thôi mở con mới; lần 2 dừng hết.
 
-    Con mở với start_new_session=True để Ctrl-C trên terminal chỉ tới tiến trình
-    cha: một lần lỡ tay không được giết trận đang thi.
+    Con mở trong nhóm tiến trình riêng (start_new_session trên POSIX,
+    CREATE_NEW_PROCESS_GROUP trên Windows) để Ctrl-C trên terminal chỉ tới tiến
+    trình cha: một lần lỡ tay không được giết trận đang thi.
     """
 
     def __init__(self, args, log: Log):
@@ -221,11 +223,9 @@ class Supervisor:
         base = os.path.join(self.out_dir, f"{kind}-{slug(label)}-{slug(token_var)}-{stamp}")
         os.makedirs(self.out_dir, exist_ok=True)
         cmd = child_command(self.args, ref, token_var, base + "-summary.json", label)
-        env = dict(os.environ)
-        env["PYTHONPATH"] = PROJECT_ROOT + os.pathsep + env.get("PYTHONPATH", "")
         with open(base + ".log", "a", encoding="utf-8") as log_file:
             proc = subprocess.Popen(cmd, stdout=log_file, stderr=subprocess.STDOUT, cwd=PROJECT_ROOT,
-                                    env=env, start_new_session=True)
+                                    env=child_env(PROJECT_ROOT), **detached_kwargs())
         child = Child(ref, token_var, proc, base + "-summary.json", base + ".log")
         self.children[(ref.game_id, token_var)] = child
         self.log(f"bắt đầu {label} ({token_var}) — log: {child.log_path}")

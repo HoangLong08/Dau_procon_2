@@ -6,7 +6,7 @@ kết quả tệ nhất cũng chỉ là điểm thấp hơn, không bao giờ l�
 
 import random
 import time
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, Optional, Sequence, Tuple
 
 from .construct import construct, repair
 from .decoder import Decoded, decode
@@ -21,22 +21,51 @@ REWARD_ACCEPT = 1.0
 WEIGHT_DECAY = 0.8
 WEIGHT_FLOOR = 0.1
 ADAPT_EVERY = 50
-RRT_RATIO = 0.02
+#: dải chấp nhận nghiệm kém hơn nghiệm tốt nhất, tính theo B (một loại udon trong ngày).
+#: Tuyệt đối chứ không theo phần trăm điểm: thưởng L lớn (cases 9.7) hay phạt chuỗi
+#: không kịp ghé làm điểm phình to, và dải phần trăm khi đó từng nhận cả nghiệm mất
+#: trọn một chuỗi-ngày.
+RRT_BAND = 0.25
 RESTART_AFTER = 500
 
 
 def _remove_stops(sol: DaySolution, victims: Sequence[Tuple[int, int]]) -> DaySolution:
-    """Bỏ các điểm dừng (slot, chỉ số) và dời điểm hẹn cho khớp."""
-    by_patrol: Dict[int, List[int]] = {}
+    """Bỏ các điểm dừng (slot, chỉ số); điểm hẹn và lệnh đợi đi theo điểm dừng của chúng.
+
+    Điểm hẹn gắn vào điểm dừng còn lại được dời sang chỉ số mới; gắn vào điểm dừng bị bỏ
+    thì bỏ theo. Bỏ cả điểm hẹn của tour bị động (cách cũ) làm điểm hẹn tiếp nhiên liệu
+    rụng dần trong lúc tìm kiếm, vì chỉ bộ dựng ban đầu mới thêm lại chúng.
+    """
+    by_patrol: Dict[int, set] = {}
     for slot, idx in victims:
-        by_patrol.setdefault(slot, []).append(idx)
-    for slot, idxs in by_patrol.items():
-        keep = [s for i, s in enumerate(sol.tours[slot]) if i not in set(idxs)]
+        by_patrol.setdefault(slot, set()).add(idx)
+    new_index: Dict[int, Dict[int, int]] = {}
+    for slot, gone in by_patrol.items():
+        mapping = {-1: -1}
+        keep = []
+        for i, spot in enumerate(sol.tours[slot]):
+            if i not in gone:
+                mapping[i] = len(keep)
+                keep.append(spot)
         sol.tours[slot] = keep
-    # điểm hẹn và lệnh đợi gắn với chỉ số điểm dừng nên không còn tin cậy: bỏ theo tour bị động
-    touched = set(by_patrol)
-    sol.meets = [m for m in sol.meets if m.patrol not in touched or m.stop_idx == -1]
-    sol.waits = {k: v for k, v in sol.waits.items() if k[0] not in touched}
+        new_index[slot] = mapping
+
+    def moved(slot: int, idx: int) -> Optional[int]:
+        mapping = new_index.get(slot)
+        return idx if mapping is None else mapping.get(idx)
+
+    meets = []
+    for m in sol.meets:
+        idx = moved(m.patrol, m.stop_idx)
+        if idx is not None:
+            meets.append(m if idx == m.stop_idx else Meet(m.patrol, idx, m.car))
+    sol.meets = meets
+    waits = {}
+    for (slot, idx), w in sol.waits.items():
+        new = moved(slot, idx)
+        if new is not None:
+            waits[(slot, new)] = w
+    sol.waits = waits
     return sol
 
 
@@ -252,7 +281,7 @@ def improve(
             destroy.award(d_name, REWARD_BETTER)
             repair_ops.award(r_name, REWARD_BETTER)
             since_best += 1
-        elif s >= best_dec.score - RRT_RATIO * abs(best_dec.score):
+        elif s >= best_dec.score - RRT_BAND * ctx.weights.B:
             cur, cur_dec = cand, cand_dec
             destroy.award(d_name, REWARD_ACCEPT)
             repair_ops.award(r_name, REWARD_ACCEPT)

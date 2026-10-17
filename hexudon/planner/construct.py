@@ -87,7 +87,7 @@ class InsertionState:
         if self.covered.get(brand, 0) == 0:
             gain += w.B
             if brand not in ctx.visited_brands:
-                gain += w.new_brand * w.B
+                gain += ctx.new_brand_value
         if ctx.stocks[spot] > self.targeted.get(spot, 0):
             gain += w.serving
         return gain
@@ -116,6 +116,14 @@ class InsertionState:
 
     def apply(self, slot: int, pos: int, spot: int, dsteps: float, dfuel: float):
         self.sol.tours[slot].insert(pos, spot)
+        # điểm hẹn và lệnh đợi đi theo điểm dừng của chúng, không đứng yên ở chỉ số cũ
+        if self.sol.meets:
+            self.sol.meets = [Meet(m.patrol, m.stop_idx + 1, m.car)
+                              if m.patrol == slot and m.stop_idx >= pos else m
+                              for m in self.sol.meets]
+        if self.sol.waits:
+            self.sol.waits = {((s, i + 1) if s == slot and i >= pos else (s, i)): w
+                              for (s, i), w in self.sol.waits.items()}
         self.tour_steps[slot] += dsteps
         self.tour_fuel[slot] += dfuel
         self.targeted[spot] = self.targeted.get(spot, 0) + 1

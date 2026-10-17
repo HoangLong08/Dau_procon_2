@@ -12,7 +12,7 @@ import unittest
 import urllib.error
 import urllib.request
 
-from hexudon.cli import _install_exit_signals
+from hexudon.cli import EXIT_SIGNALS, _install_exit_signals
 from hexudon.client.web_games import CONTEST, PRACTICE, GameRef
 from hexudon.offline.mapgen import generate
 from hexudon.offline.web_server import WebWorld, serve_web
@@ -258,14 +258,20 @@ class VizServerTest(unittest.TestCase):
 
 
 class ExitSignalsTest(unittest.TestCase):
-    """F1: cmd_viz phải dừng theo SIGTERM/SIGHUP (đóng terminal), không chỉ Ctrl-C."""
+    """F1: cmd_viz phải dừng theo SIGTERM/SIGHUP (đóng terminal), không chỉ Ctrl-C.
 
-    def test_install_exit_signals_makes_sigterm_and_sighup_raise_keyboard_interrupt(self):
-        previous = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGHUP)}
+    Trên Windows không có SIGHUP: chỉ đăng ký tín hiệu máy có (SIGTERM, SIGBREAK),
+    và cài đặt không được lỗi vì thiếu SIGHUP.
+    """
+
+    def test_install_exit_signals_makes_available_exit_signals_raise_keyboard_interrupt(self):
+        available = [getattr(signal, name) for name in EXIT_SIGNALS if hasattr(signal, name)]
+        self.assertIn(signal.SIGTERM, available)
+        previous = {sig: signal.getsignal(sig) for sig in available}
         for sig, handler in previous.items():
             self.addCleanup(signal.signal, sig, handler)
         _install_exit_signals()
-        for sig in (signal.SIGTERM, signal.SIGHUP):
+        for sig in available:
             handler = signal.getsignal(sig)
             with self.assertRaises(KeyboardInterrupt):
                 handler(sig, None)

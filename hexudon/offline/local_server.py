@@ -30,10 +30,17 @@ class Team:
         self.daily_types = 0
         self.servings = 0
         self.invalid = 0
+        #: tổng thời gian phản hồi của bài hợp lệ cuối cùng mỗi ngày (tiêu chí 4 của đề)
         self.response_seconds = 0.0
+        #: thời gian phản hồi của bài hợp lệ cuối cùng trong ngày đang mở
+        self.last_response: Optional[float] = None
 
     def score(self):
         return (len(self.brands), self.daily_types, self.servings)
+
+    def rank_key(self):
+        """Thứ tự xếp hạng của đề: L, D, Q, rồi tổng thời gian phản hồi thấp hơn."""
+        return (*self.score(), -self.response_seconds)
 
 
 class LocalMatch:
@@ -51,7 +58,8 @@ class LocalMatch:
             for j, a in enumerate(team.agents):
                 a.kind = team.kinds[j]
             self.teams.append(team)
-        self.config.players = max(config.players, len(self.teams))
+        # lưu lượng chia cho số đội thật trong trận (cases 3, 8.8)
+        self.config.players = len(self.teams)
         self.by_token = {t.token: t for t in self.teams}
         self.day = 0
         self.started_at = time.time() + start_delay
@@ -96,7 +104,8 @@ class LocalMatch:
                 return {"ok": False, "reason": result.error.code, "detail": str(result.error)}
             team.plan = [list(seq) for seq in plan]
             team.submitted_day = self.day
-            team.response_seconds = max(0.0, time.time() - (self.day_deadline - self.config.seconds_of_day(self.day)))
+            # chỉ bài hợp lệ cuối cùng của ngày mới tính thời gian phản hồi
+            team.last_response = max(0.0, time.time() - (self.day_deadline - self.config.seconds_of_day(self.day)))
             return {"ok": True, "day": self.day + 1}
 
     def maybe_advance(self) -> None:
@@ -121,15 +130,20 @@ class LocalMatch:
         combined: Dict[int, int] = {}
         for team in self.teams:
             plan = team.plan
+            # ngày không có bài hợp lệ thì không cộng gì, như server thật
+            response = 0.0
+            bot_seconds = 0.0
             if team.bot is not None:
                 state = DayState(day=self.day,
                                  agents=[AgentState(a.kind, a.pos, a.fuel) for a in team.agents],
                                  road_status=dict(self.status), others=[], ends_at=self.day_deadline)
+                started = time.monotonic()
                 try:
                     plan = team.bot.plan(state)
                 except Exception as exc:
                     self.log(f"bot nội bộ lỗi: {exc!r}")
                     plan = None
+                bot_seconds = time.monotonic() - started
             stocks = [s.stocks for s in cfg.spots]
             result = None
             if plan is not None and team.submitted_day == self.day or team.bot is not None:
@@ -138,6 +152,10 @@ class LocalMatch:
                     if not result.ok:
                         team.invalid += 1
                         result = None
+                    else:
+                        response = bot_seconds if team.bot is not None else (team.last_response or 0.0)
+            team.response_seconds += response
+            team.last_response = None
             if result is None:
                 result = run_day(cfg, steps, team.agents, wait_plan(cfg.n_agents, steps),
                                  stocks, self.status)
@@ -160,12 +178,13 @@ class LocalMatch:
         self.day_deadline = time.time() + cfg.seconds_of_day(self.day)
 
     def standings(self) -> dict:
-        ranked = sorted(self.teams, key=lambda t: t.score(), reverse=True)
+        ranked = sorted(self.teams, key=lambda t: t.rank_key(), reverse=True)
         return {
             "finished": self.finished,
             "standings": [
                 {"name": t.name, "types": len(t.brands), "dailyTypes": t.daily_types,
-                 "servings": t.servings, "invalid": t.invalid}
+                 "servings": t.servings, "responseSeconds": round(t.response_seconds, 3),
+                 "invalid": t.invalid}
                 for t in ranked
             ],
         }

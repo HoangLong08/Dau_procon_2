@@ -318,7 +318,8 @@ class WebTransport(Transport):
         if st.day in self.accepted_plans or self.config is None:
             return False
         self.log(f"Ngày {st.day + 1}: chưa có bài nào được nhận; gửi bài đứng yên để trận đi tiếp")
-        self.send_actions(st.day, wait_plan(self.config.n_agents, self.config.steps_of_day(st.day)))
+        steps = st.steps_today or self.config.steps_of_day(st.day)
+        self.send_actions(st.day, wait_plan(self.config.n_agents, steps))
         self.sleep(1.0)
         return True
 
@@ -345,6 +346,9 @@ class WebTransport(Transport):
             state.ends_at = None
         elif st.day_deadline_in is not None:
             state.ends_at = st.read_at + st.day_deadline_in
+        if st.steps_today:
+            # số bước server báo cho đúng ngày này: tổng bước mỗi xe phải khớp nó (Formats)
+            state.steps = st.steps_today
         if state.agents:
             self.kinds = [a.kind for a in state.agents]
         return state

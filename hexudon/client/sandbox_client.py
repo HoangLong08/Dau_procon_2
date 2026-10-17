@@ -87,7 +87,13 @@ class SandboxTransport(Transport):
             if self._is_end(frame):
                 raise MatchEnded(frame)
             if self._is_day(frame):
-                state = DayState.from_json(frame, kinds)
+                # cần bề rộng map để đọc vị trí dạng (cột, hàng), và dung tích bình
+                # làm mặc định khi khung ẩn xăng (đọc thành 0 thì mọi xe đứng yên)
+                state = DayState.from_json(
+                    frame, kinds,
+                    width=self.config.width if self.config is not None else None,
+                    fuel_limits=self.config.fuel_limits if self.config is not None else None,
+                )
                 if state.ends_at is None and self.config is not None:
                     state.ends_at = time.time() + self.config.seconds_of_day(state.day)
                 return state

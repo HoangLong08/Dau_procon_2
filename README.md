@@ -7,7 +7,7 @@ Python thuần, **không cài gì thêm** — chỉ thư viện chuẩn. Yêu c�
 
 ```bash
 git clone <repo> && cd procon-2026
-python -m unittest discover -s tests     # 211 test, phải xanh toàn bộ
+python -m unittest discover -s tests     # 262 test, phải xanh toàn bộ (Windows, macOS, Linux)
 ```
 
 ---
@@ -78,7 +78,7 @@ python -m hexudon sandbox --search-seconds 3.0
 ```
 
 Mỗi khung chỉ được trả lời **đúng một dòng**, nên ở chế độ này bot gửi một lần duy
-nhất sau khi tìm kiếm xong, thay vì gửi hai lần như chế độ HTTP.
+nhất sau khi tìm kiếm xong, thay vì gửi tới ba lần như chế độ HTTP.
 
 ### Luyện tập tại chỗ
 
@@ -105,6 +105,12 @@ python -m hexudon sim --map data/sample_maps/sample_24.json --bots search,greedy
 # nhiều map × nhiều seed, ghi báo cáo JSON
 python -m hexudon bench --maps sample_16,sample_24,sample_32 --count 3 --out bench.json
 
+# như trên nhưng tất định và song song: ngân sách theo số vòng ALNS, 11 trận một lúc
+python -m hexudon bench --maps sample_16,sample_24,sample_32,random24 --count 6        --search-iterations 1000 --role-iterations 100 --jobs 11 --out bench.json
+
+# A/B: hai bộ trọng số của bot chơi CÙNG trận nhiều đội, so từng cặp, có khoảng tin cậy
+python -m hexudon ab --b fuel_bonus=2 --count 6 --jobs 11 --out ab.json
+
 # chỉ xem bước chọn vai trò quyết định thế nào
 python -m hexudon roles --map data/sample_maps/sample_32.json
 ```
@@ -127,7 +133,8 @@ python -m hexudon roles --map data/sample_maps/sample_32.json
 | `sandbox` | thi đấu khi ban tổ chức chấm qua stdin/stdout |
 | `serve` | dựng server luyện tập tại chỗ |
 | `sim` | chạy một trận offline, so các chiến thuật |
-| `bench` | chạy nhiều map × nhiều seed, ra bảng thắng/thua |
+| `bench` | chạy nhiều map × nhiều seed, ra bảng thắng/thua; `--jobs` chạy song song, `--search-iterations` cho kết quả tất định |
+| `ab` | hai bộ trọng số của bot chơi cùng trận nhiều đội; so từng cặp trận, báo ΔL, ΔD, ΔQ kèm khoảng tin cậy 95% |
 | `roles` | xem riêng bước chọn vai trò xe |
 
 ### Tham số thời gian (quan trọng nhất trong ngày thi)
@@ -176,6 +183,16 @@ vì việc chọn vai trò chạy trong khi các ngày đó mở rồi đóng.
 Đối thủ nội bộ (`--bots`, `--opponents`): `search` (chính bot này), `greedy` (chỉ
 bộ dựng nghiệm, không tìm kiếm), `sample` (bot mẫu), `wait` (đứng yên).
 
+Lưu lượng đường chia cho **số đội thật trong trận**, tức số bot, không phải `players`
+ghi trong map mẫu (ba map mẫu ghi 10). Với `sim`, `--players` lớn hơn số bot giả lập
+thêm các đội có tên nhưng đứng yên cả trận. Xếp hạng theo L, D, Q rồi tổng thời gian
+phản hồi (thời điểm gửi bài cuối cùng mỗi ngày), như đề.
+
+Map ngẫu nhiên phủ đủ phạm vi của đề: số bước từng ngày không nhất thiết tăng dần,
+bình xăng có thể nhỏ hơn một ngày đi, hai ngưỡng giao thông có thể bằng nhau. Tên map:
+`random24` là 24×24, `random8x32` là rộng 8 cao 32 (map dài và hẹp), `random` bốc ngẫu
+nhiên cả rộng lẫn cao.
+
 ---
 
 ## 3. Chiến thuật
@@ -189,17 +206,20 @@ Xét theo **thứ tự từ điển** — hơn ở tiêu chí trước là thắ
 3. **Q** — tổng số phần udon
 4. thời gian phản hồi thấp hơn
 
-Với tham số chính thức (map 8–32, 3–8 xe, 4–10 ngày, mỗi ngày W+H đến 4(W+H) bước),
-**L bão hoà rất nhanh**: trong cả 9 trận benchmark gần nhất, L của ta *bằng* L của
-đối thủ mạnh nhất ở mọi trận. Nên **D mới là chiến trường thật sự**, và bot được
-chỉnh để tối đa D chứ không phải Q.
+Trên ba map mẫu, mọi bot mạnh thường lấy đủ mọi chuỗi nên L hay hoà và D phân thắng
+thua. Nhưng đó không phải luật: map có chuỗi hiếm (chỉ một điểm, ở xa, sau núi hoặc
+ao) thì sót một chuỗi là thua dù D cao (`cases.md` 6.3, 10.8). Vì vậy bot giữ đúng thứ
+tự của đề: **một loại mới cả trận luôn hơn mọi số loại trong ngày**, một loại mới
+trong ngày luôn hơn mọi số phần.
 
 ### Năm trụ cột
 
-**1. Hàm mục tiêu hướng theo D, không theo Q.** Thu một chuỗi *mới trong ngày* được
-thưởng mạnh hơn nhiều so với thêm một phần udon. Cộng thêm giá trị cuối ngày: chuỗi
-chưa ghé mà sắp không còn kịp thì bị phạt nặng; kết thúc ngày trên spot hoặc gần
-chuỗi chưa ghé thì được thưởng; xe sắp kẹt xăng bị phạt theo số ngày còn lại.
+**1. Hàm mục tiêu theo đúng thứ tự từ điển.** Thưởng cho một loại mới cả trận là
+`max(0,5; số chuỗi + 1) × B`, lớn hơn mọi phần D một ngày có thể thêm, nên bot lấy
+chuỗi hiếm sớm thay vì để tới ngày cuối. Một chuỗi *mới trong ngày* (B) hơn hẳn mọi số
+phần udon. Cộng thêm giá trị cuối ngày: chuỗi chưa ghé mà sắp không còn kịp thì bị
+phạt nặng; kết thúc ngày trên spot hoặc gần chuỗi chưa ghé thì được thưởng; xe sắp
+kẹt xăng (xăng ít hơn mức cần để rời **ô đang đứng**) bị phạt theo số ngày còn lại.
 
 **2. Chọn vai trò bằng mô phỏng, trước ngày 0.** Thử các phương án 0, 1, 2, 3 xe
 tiếp nhiên liệu ở những vị trí trung tâm khác nhau, **chơi thử trọn trận** từng
@@ -208,28 +228,47 @@ bị loại, thay vì đem so với phương án chơi đủ — so lẫn lộn 
 sách đôi khi lại cho kết quả *tệ hơn*.
 
 **3. Tiếp nhiên liệu bằng điểm hẹn.** Điểm hẹn đặt ngay trên lộ trình xe tuần tra;
-xe tiếp nhiên liệu tới trước và đợi. Theo luật, trong cùng một bước nhiên liệu bị
-**trừ trước** rồi mới **nạp sau**, nên xe đi kèm xe tiếp luôn đầy bình cuối mỗi
-bước, còn xe bám sau một ô thì không bao giờ được tiếp. Nếu không kịp hẹn thì bỏ
-điểm hẹn — bài vẫn hợp lệ.
+xe tiếp nhiên liệu tới trước và đợi. Trong cùng một bước, simulator **trừ xăng trước**
+rồi mới **nạp sau** (theo ví dụ 8 tác nhân của BTC Nhật), nên xe đi kèm xe tiếp luôn
+đầy bình cuối mỗi bước. Xe bám sau một ô chỉ gặp được xe tiếp khi hai ô tốn số bước
+khác nhau (ví dụ núi 3 bước, đồng bằng 2), nên bot không trông vào cách đó mà hẹn
+cùng một ô. Câu chữ của đề còn nói *ra lệnh đi khi thiếu xăng* là bài không hợp lệ,
+nên xe tiếp phải tới điểm hẹn **trước lúc xe tuần tra nhận lệnh rời ô**; planner kiểm
+mọi bài theo cả hai cách hiểu (`strict_fuel`). Xe tiếp tới muộn không quá 8 bước thì
+xe tuần tra chờ thêm; muộn hơn thì bỏ điểm hẹn — bài vẫn hợp lệ. Hết điểm hẹn, xe
+tiếp không đỗ trên ô đường tới cuối ngày.
 
 **4. Dự báo giao thông.** Lưu lượng ô đường tính từ stay-step của **mọi đội trong
 hai ngày trước** chia cho số đội. Bot ước lượng ô nào sẽ đông đúc hoặc ùn tắc ngày
-mai dựa trên độ phổ biến của hành lang cộng chính vết chân của mình, rồi dùng dự
-báo đó cho giá trị cuối ngày. Ngày 0 mọi đường đều thông thoáng nên bot khai thác
-đường mạnh; các ngày sau nó tránh dần những hành lang đang xấu đi.
+mai dựa trên độ phổ biến của hành lang, cộng vết của chính mình **cả hôm nay lẫn hôm
+qua**, rồi dùng dự báo đó cho giá trị cuối ngày. Ở ngày 2, dự báo cho ngày 3 không
+bao giờ tốt hơn tình trạng hôm nay, vì lưu lượng ngày 3 gồm cả vết ngày 1 lẫn ngày 2.
+Ngày 0 mọi đường đều thông thoáng nên bot khai thác đường mạnh; các ngày sau nó tránh
+dần những hành lang đang xấu đi.
 
 **5. Tìm kiếm ALNS trên nghiệm "lộ trình spot + điểm hẹn".** Bộ giải mã là **toàn
-phần**: mọi nghiệm, kể cả nghiệm vô lý, đều ra kế hoạch mà simulator chấp nhận —
-đã fuzz khoảng 1.900 ca đối kháng, 0 bài sai. Nghiệm nào không sửa nổi thành hợp lệ
-thì bị chấm điểm tệ nhất chứ không bao giờ được chọn.
+phần**: mọi nghiệm, kể cả nghiệm vô lý, đều ra kế hoạch mà simulator chấp nhận theo
+cả hai cách hiểu luật xăng — đã fuzz khoảng 1.900 ca đối kháng, 0 bài bị simulator
+từ chối (server thật có thể khác ở chỗ simulator chưa mô tả đúng; xem đối chiếu
+replay). Nghiệm nào không sửa nổi thành hợp lệ thì bị chấm điểm tệ nhất chứ không
+bao giờ được chọn. ALNS bắt đầu từ chính bài an toàn, nên bài cuối không kém nó, và
+chỉ nhận nghiệm kém nghiệm tốt nhất không quá 0,25 B.
 
 ### Cách chia thời gian trong một ngày
 
 Bot gửi **bài an toàn** trong khoảng 10 ms sau khi nhận trạng thái, rồi tiếp tục
-tìm kiếm tới `--search-seconds` và **gửi lại bài tốt hơn**. Theo luật, bài hợp lệ
-cuối cùng trước hạn mới là bài được áp dụng, nên gửi hai lần vừa an toàn vừa mạnh:
-kể cả máy treo hay mạng đứt giữa chừng, ngày đó vẫn có bài hợp lệ đã nằm ở server.
+tìm kiếm tới `--search-seconds`. Theo luật, bài hợp lệ cuối cùng trước hạn là bài
+được áp dụng, và **thời gian phản hồi (tiêu chí 4) tính theo đúng bài đó**. Vì vậy:
+
+- gửi tối đa **3 lần mỗi ngày**: bài an toàn, một bài giữa chừng, bài cuối;
+- chỉ gửi lại khi L, D hoặc Q của hôm nay tăng, hoặc điểm tăng ít nhất 0,25 B; chênh
+  lệch nhỏ hơn chỉ làm chậm thời gian phản hồi;
+- bài tốt hơn rõ rệt được gửi **ngay khi tìm ra**, không đợi hết giờ tìm kiếm;
+- bài cuối trùng bài đã gửi thì không gửi lại.
+
+Kể cả máy treo hay mạng đứt giữa chừng, ngày đó vẫn có bài hợp lệ đã nằm ở server. Bộ
+nhớ trận (các loại đã thu, vị trí dự đoán, vết giao thông) ghi theo đúng bài server đã
+nhận, không theo bài tốt nhất bot nghĩ ra.
 
 Mọi cuộc gọi mạng đều bị chặn cứng bởi hạn của ngày. `timeout` của socket chỉ áp
 cho *mỗi lần đọc*, không phải cả cuộc gọi: một server nhả dữ liệu nhỏ giọt từng kéo
@@ -238,15 +277,44 @@ dài một request tới **58 giây** dù `--timeout 2`. Quá hạn thì bot b�
 
 ### Kết quả đo gần nhất
 
-`bench --maps sample_16,sample_24,sample_32 --count 3 --search-seconds 3.0`:
+Đối chứng trước/sau đợt sửa điểm hẹn và định giá xăng (07/10/2026, Windows): `bench`
+trên 9 map × 6 seed (3 map mẫu, `random16`–`random32`, bản đồ trận thật `f06e9b26`),
+1.000 vòng ALNS mỗi ngày (`--search-iterations 1000 --role-iterations 100`), đối thủ
+2 `search` + `greedy` + `sample`, `--jobs 11`. Cùng map, cùng seed nên so được từng cặp:
 
-```
-9 thắng / 0 hoà / 0 thua | bài không hợp lệ: 0 | thời gian ngày p99 3,069 s
-sample_32 seed 0:  ta (24, 109, 157)  |  đối thủ tốt nhất (24, 87, 130)
-```
+| Phiên bản | L | D | Q | bài sai |
+|---|---|---|---|---|
+| trước (đợt sửa 03/10) | 1002 | 6009 | 10859 | 0 |
+| điểm hẹn đi theo điểm dừng | 1003 | 6108 | 11003 | 0 |
+| điểm hẹn + `fuel_bonus` 1,0 (hiện tại) | 1003 | 6206 | 11594 | 0 |
 
-Trận luyện tập 16×16 với `greedy` và `sample`: ta (12, 52, 69) so với greedy
-(12, 43, 56) — L bằng nhau, thắng nhờ D.
+Bản hiện tại hơn bản trước ở 38/54 cặp trận, kém 15 (kiểm định dấu p = 0,002); mỗi
+trận D +3,65 ± 2,47 và Q +13,6 ± 6,4 (khoảng tin cậy 95%). Lợi dồn vào map thiếu xăng
+(`random28`, `random32`, `sample_16`); trên bản đồ trận thật, D đã sát trần 200 nên gần
+như không đổi. A/B riêng trên bản đồ đó (20 seed, mẫu số 41 đội): `fuel_bonus` 1,0 và 0,2
+mỗi bên hơn 10 trận, ΔD −0,40 ± 0,70, ΔQ +1,0 ± 5,7, tức không khác biệt. Thời gian mỗi
+ngày không tăng.
+
+`fuel_bonus` được chọn bằng `ab` (54 trận mỗi lần, hai biến thể chơi cùng trận): 1,0 hơn
+0,2 ở 37 trận, kém 14, ΔD +1,50 ± 1,04; 2,0 hơn 0,2 ở 38 trận, kém 15, ΔD +1,93 ± 2,10
+nhưng có trận thua 34 D; 1,0 đấu thẳng 2,0 thì ngang nhau (28/4/22, ΔD −0,81 ± 2,45). Luật
+xếp D trước Q nên chọn 1,0, mức tăng D ổn định hơn.
+
+Đối chứng trước/sau đợt sửa theo `cases.md` (03/10/2026, Windows): 3 map mẫu × 6 seed,
+cùng loại xe (1 xe tiếp ở vị trí trung tâm nhất), `--search-seconds 1`, đối thủ
+`greedy` + 2 `sample`, lưu lượng chia cho 4 đội. Tổng của 18 trận:
+
+| Phiên bản | L | D | Q | bài sai |
+|---|---|---|---|---|
+| trước khi sửa (commit `1f8dbee`) | 322 | 1300 | 1763 | 0 |
+| sau khi sửa | 324 | 1298 | 1771 | 0 |
+
+Chênh lệch D và Q nằm trong độ nhiễu giữa các lần chạy (khoảng ±1%). L hơn 2: trên
+`sample_24` bản mới lấy đủ 18 chuỗi ở cả 6 seed, đúng tác dụng của việc ưu tiên L.
+
+Số đo cũ hơn, trước đợt sửa: `bench --maps sample_16,sample_24,sample_32 --count 3
+--search-seconds 3.0` ra 9 thắng / 0 hoà / 0 thua, 0 bài sai (khi đó xếp hạng chưa
+xét thời gian phản hồi và lưu lượng chia cho 10 đội).
 
 ---
 
@@ -255,7 +323,8 @@ Trận luyện tập 16×16 với `greedy` và `sample`: ta (12, 52, 69) so vớ
 | Thư mục | Vai trò |
 |---|---|
 | `hexudon/geometry.py`, `rules.py`, `model.py` | hình học even-r, bảng chi phí, đọc/ghi JSON |
-| `hexudon/simulator.py` | **nguồn chân lý về luật**: 5 pha mỗi bước, kiểm hợp lệ |
+| `hexudon/simulator.py` | **nguồn chân lý về luật**: 5 pha mỗi bước, kiểm hợp lệ (thêm `strict_fuel` cho planner), bài dự phòng `idle_plan`, gộp lệnh chờ `compact_plan` |
+| `hexudon/procs.py` | tiến trình con chạy được trên cả Windows lẫn Linux/macOS (nhóm tiến trình, dừng mềm, UTF-8) |
 | `hexudon/pathing.py`, `traffic.py` | Dijkstra trọng số đỉnh, dự báo giao thông |
 | `hexudon/planner/` | nghiệm, bộ giải mã, hàm mục tiêu, dựng nghiệm, ALNS, vai trò, bộ nhớ trận |
 | `hexudon/client/` | HTTP, sandbox, vòng đời trận |
@@ -282,8 +351,10 @@ python -m hexudon web --live --match <ID hoặc tên trận BTC công bố> --fo
 Bot tự chờ cửa sổ chọn xe, chọn vai trò, chơi từng ngày và bắt mọi câu của trận kể cả
 câu chạy gối đầu. Trận chưa được công bố thì bot hỏi lại mỗi 15 s cho tới khi thấy, nên
 chạy lệnh sớm trước giờ cũng được. Ctrl-C **một lần** chỉ làm bot thôi bắt câu mới, các
-câu đang chơi vẫn chơi nốt; Ctrl-C lần hai mới dừng hết. Nếu manager API lỗi, chạy từng
-câu bằng `python -m hexudon web --live --game <ID câu>`.
+câu đang chơi vẫn chơi nốt; Ctrl-C lần hai mới dừng hết. Trên Windows cũng vậy: mỗi bot
+con chạy trong nhóm tiến trình riêng (`CREATE_NEW_PROCESS_GROUP`), nên Ctrl-C ở terminal
+chỉ tới tiến trình cha. Nếu manager API lỗi, chạy từng câu bằng
+`python -m hexudon web --live --game <ID câu>`.
 
 Máy chạy bot (thi thử Mock Contest với hai token — 16 bot trên laptop 8 lõi — đã làm
 nhiều lần nộp bị timeout):
@@ -321,10 +392,10 @@ Bot tự xử lý các tình huống sau, không cần can thiệp — mỗi dò
 | Poll quá nhanh (HTTP 429) | chờ rồi thử lại |
 | Mất mạng, timeout, lỗi 5xx | thử lại giãn cách tăng dần, nhưng không bao giờ quá hạn của ngày |
 | Server trả dữ liệu nhỏ giọt | bỏ cuộc gọi khi hết hạn, thay vì treo hàng chục giây |
-| Bài bị từ chối | gửi bài an toàn; vẫn bị từ chối thì gửi bài đứng yên (luôn hợp lệ) |
+| Bài bị từ chối | gửi bài dự phòng: xe nào đang ở ô đường thì bước sang ô đồng bằng kề bên rồi đứng yên (không để lại vết cả ngày trên đường); vẫn bị từ chối thì gửi bài đứng yên thuần (luôn hợp lệ) |
 | Bị từ chối bằng HTTP 200 kèm `reason: E_*` | vẫn hiểu là bị từ chối, không phải thành công |
 | Server đòi kiểu bọc JSON khác | tự thử `[...]`, `{"actions": ...}`, `{"types": ...}` rồi nhớ kiểu đúng |
-| Server đánh số ngày từ 1 | nhận ra qua lỗi số bước, tự lùi chỉ số ngày cho cả trận |
+| Server đánh số ngày từ 1 | nhận ra qua lỗi số bước, tự lùi chỉ số ngày cho cả trận — chỉ khi server không báo số bước của ngày; server web báo `steps_today` nên bot dùng luôn số đó, không đoán (theo Formats, ngày đầu có `day` = 0) |
 | Trường lạ hoặc thiếu trong `/setup`, `/state` | nhận tên thay thế, hỏi lại, không chết |
 | Server ẩn nhiên liệu (`fuel: null`) | coi như bình đầy, không phải bình cạn |
 | Server không nhận mảng vai trò | chuyển sang đúng vai trò server đang hiểu |
@@ -341,7 +412,7 @@ Ba mức, từ nhanh tới giống ngày thi nhất. Mọi lệnh chạy ở th�
 ### 6.1. Test tự động (khoảng 2 phút, không cần mạng)
 
 ```bash
-python -m unittest discover -s tests      # phải ra: Ran 211 tests ... OK
+python -m unittest discover -s tests      # phải ra: Ran 262 tests ... OK
 ```
 
 ### 6.2. Tập dượt trên máy bằng server giả (không cần mạng, không cần token thật)
@@ -434,6 +505,21 @@ Phần lõi:
   gọi mạng kéo 58 giây, lỗi 503 thoáng qua kết thúc trận sớm, `fuel: null` đọc
   thành bình cạn, ngân sách vai trò ăn mất ba ngày đầu.
 
+Phần đối chiếu với `cases.md` (thêm ngày 03/10/2026):
+
+- **`tests/test_simulator_rules.py`** — kiểm xăng theo hai cách hiểu (ví dụ chính thức
+  và câu chữ của đề), gộp lệnh chờ, bài dự phòng không đứng cả ngày trên ô đường.
+- **`tests/test_submit_policy.py`** — chính sách gửi lại (tối đa 3 lần, chỉ gửi khi
+  đáng), bộ nhớ trận theo bài server đã nhận, số bước theo `steps_today` của server.
+- **`tests/test_offline_rules.py`** — xếp hạng có thời gian phản hồi, mọi đội thấy
+  cùng ảnh vị trí đầu ngày, map ngẫu nhiên phủ đủ phạm vi tham số của đề.
+
+Thêm ngày 07/10/2026:
+
+- **`tests/test_meets_and_budget.py`** — điểm hẹn tiếp nhiên liệu đi theo đúng điểm
+  dừng khi ALNS phá và chèn (chạy qua mọi toán tử phá), ngân sách theo số vòng cho kết
+  quả tất định, `bench --jobs` ra đúng số như chạy tuần tự, `ab` chạy lại ra cùng kết quả.
+
 ---
 
 ## 7. Web trực quan hoá
@@ -456,21 +542,22 @@ python -m hexudon viz --open        # mở http://127.0.0.1:8765
 - Bot `web` hoặc `arena` chạy từ dòng lệnh cũng ghi được sự kiện bằng `--events <file.jsonl>`; file này
   là JSONL thuần (đọc lại bằng `hexudon.viz.events.read_events`) và **không** hiện trong "Trận cũ" — mục
   đó chỉ liệt kê các trận mở từ chính web.
-- **Dừng:** bấm một lần để bot dừng (Ctrl-C), lần hai để dừng hẳn; tắt web (Ctrl-C hoặc đóng terminal)
-  cũng dừng mọi bot web đã mở.
+- **Dừng:** bấm một lần để bot dừng (Ctrl-C; trên Windows là Ctrl-Break gửi tới nhóm tiến trình của bot),
+  lần hai để dừng hẳn; tắt web (Ctrl-C hoặc đóng terminal) cũng dừng mọi bot web đã mở.
 
 ---
 
 ## 8. Việc còn lại
 
-Bốn điểm đã xác định nhưng **chưa sửa** — đều là ăn thêm điểm chứ không phải lỗi
-sống còn, và đều đổi hành vi tìm kiếm nên cần benchmark đối chứng trước/sau:
+Đợt rà soát theo `cases.md` (03/10/2026) đã sửa ba trong bốn điểm từng ghi ở đây: ALNS
+nay bắt đầu từ bài an toàn, `V_fuel` xét đúng ô đang đứng, và dải chấp nhận của ALNS
+là 0,25 B cố định. Điểm thứ tư (kế hoạch tiếp nhiên liệu rụng dần trong lúc tìm kiếm)
+được sửa ngày 07/10/2026: điểm hẹn và lệnh đợi nay đi theo điểm dừng khi phá
+(`_remove_stops`) và khi chèn (`InsertionState.apply`), thay vì bị xoá cả tour. Còn lại:
 
-1. ALNS vứt bài an toàn rồi dựng lại từ nghiệm khác, nên có lúc thua chính bài đã
-   vứt (đo được 6/45 ngày, tệ nhất mất 6 "chuỗi-ngày" ở ngày cuối `sample_32`).
-2. `repair()` không gọi lại `add_fuel_meets`, nên kế hoạch tiếp nhiên liệu rụng dần
-   trong lúc tìm kiếm.
-3. `V_fuel` xét chi phí ô hàng xóm thay vì ô đang đứng — ngược với luật, bỏ sót
-   đúng ca xe còn 1 nhiên liệu trên đường hoặc núi.
-4. Băng chấp nhận của ALNS tính theo phần trăm điểm tuyệt đối nên giãn theo cỡ map;
-   có lúc cho phép mất trọn một chuỗi-ngày.
+1. Đối thủ nội bộ của `serve` (server kiểu PTIT) chỉ lập kế hoạch lúc chốt ngày, nên
+   luôn gửi bài an toàn chứ không tìm kiếm. Chỉ ảnh hưởng server luyện tập.
+2. Hai điểm luật mà đề chưa nói rõ, simulator đang làm theo ví dụ chính thức của BTC
+   Nhật: xe đứng sẵn trên spot đầu ngày vẫn thu ở bước 1, và xe được nạp giữa lúc đang
+   đi vẫn hợp lệ. Lần đầu chơi practice trên server thật có xe như vậy, xem dòng đối
+   chiếu replay: `khớp hoàn toàn` nghĩa là server cũng làm như ví dụ.

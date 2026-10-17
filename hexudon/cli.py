@@ -11,6 +11,10 @@ from typing import List, Optional
 from . import rules
 from .model import MatchConfig
 from .client.web_api import DEFAULT_URL
+from .procs import install_break_as_interrupt
+
+#: tín hiệu dừng web như Ctrl-C; máy không có tín hiệu nào (SIGHUP trên Windows) thì bỏ qua
+EXIT_SIGNALS = ("SIGTERM", "SIGHUP", "SIGBREAK")
 
 
 def _log(msg: str) -> None:
@@ -85,8 +89,6 @@ def cmd_sim(args) -> int:
     if config is None:
         from .offline.mapgen import generate
         config = generate(seed=args.seed, size=args.size)
-    if args.players:
-        config.players = args.players
     if args.days:
         _trim_days(config, args.days)
 
@@ -99,13 +101,15 @@ def cmd_sim(args) -> int:
                             role_seconds=args.role_seconds, seed=args.seed + i))
         else:
             bots.append(cls(config, seed=args.seed + i))
-    config.players = max(config.players, len(bots))
+    # lưu lượng chia cho số đội trong trận (cases 3, 8.8); --players lớn hơn số bot
+    # giả lập thêm các đội có tên nhưng đứng yên cả trận
+    config.players = max(args.players, len(bots)) if args.players else len(bots)
     outcome = run_match(config, bots, log=_log)
     print("\nxếp hạng:")
     for rank, rec in enumerate(outcome.ranking(), 1):
         L, D, Q = rec.score()
         print(f"  {rank}. {rec.name:8s} L={L:3d} D={D:4d} Q={Q:4d}  "
-              f"bài lỗi={rec.invalid_days} vai trò={rec.kinds}")
+              f"phản hồi={rec.response_seconds:.2f}s bài lỗi={rec.invalid_days} vai trò={rec.kinds}")
     return 0
 
 
@@ -146,6 +150,35 @@ def cmd_bench(args) -> int:
         search_seconds=args.search_seconds,
         role_seconds=args.role_seconds,
         opponents=args.opponents.split(","),
+        out_path=args.out,
+        log=_log,
+        jobs=args.jobs,
+        search_iterations=args.search_iterations,
+        role_iterations=args.role_iterations,
+    )
+    return 0
+
+
+def cmd_ab(args) -> int:
+    """Hai bộ trọng số của bot chơi cùng trận; so từng cặp trận."""
+    from .offline.report import parse_weights, run_ab
+
+    try:
+        a = parse_weights(args.a)
+        b = parse_weights(args.b)
+    except ValueError as exc:
+        _log(str(exc))
+        return 2
+    run_ab(
+        maps=args.maps.split(","),
+        seeds=range(args.seed, args.seed + args.count),
+        a=a,
+        b=b,
+        opponents=[o for o in args.opponents.split(",") if o],
+        search_iterations=args.search_iterations,
+        role_iterations=args.role_iterations,
+        players=args.players,
+        jobs=args.jobs,
         out_path=args.out,
         log=_log,
     )
@@ -360,10 +393,13 @@ def _raise_keyboard_interrupt(signum, frame) -> None:
 
 
 def _install_exit_signals() -> None:
-    """SIGTERM (kill mặc định) và SIGHUP (đóng terminal) cũng phải dừng web như Ctrl-C,
-    để nhánh `finally: app.shutdown()` chạy và bot web không bị bỏ mồ côi."""
-    for sig in (signal.SIGTERM, signal.SIGHUP):
-        signal.signal(sig, _raise_keyboard_interrupt)
+    """SIGTERM (kill mặc định), SIGHUP (đóng terminal) và SIGBREAK (Ctrl-Break trên
+    Windows) cũng phải dừng web như Ctrl-C, để nhánh `finally: app.shutdown()` chạy
+    và bot web không bị bỏ mồ côi."""
+    for name in EXIT_SIGNALS:
+        sig = getattr(signal, name, None)
+        if sig is not None:
+            signal.signal(sig, _raise_keyboard_interrupt)
 
 
 def cmd_viz(args) -> int:
@@ -461,13 +497,38 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--events", required=True, help="file JSONL ghi sự kiện")
     p.set_defaults(func=cmd_arena)
 
+    def iteration_budget(p, search_default, role_default):
+        p.add_argument("--search-iterations", type=int, default=search_default,
+                       help="ngân sách tìm kiếm theo SỐ VÒNG ALNS mỗi ngày thay vì giây: tất định, "
+                            "chạy song song không làm bot yếu đi")
+        p.add_argument("--role-iterations", type=int, default=role_default,
+                       help="chọn vai trò tất định: vòng 2 chạy ALNS ngần ấy vòng mỗi ngày")
+        p.add_argument("--jobs", type=int, default=1,
+                       help="số trận chạy song song (mỗi trận một lõi); nên đi cùng --search-iterations")
+
     p = sub.add_parser("bench", help="benchmark nhiều map và seed")
     p.add_argument("--maps", default="sample_16,sample_24,sample_32,random16,random24")
     p.add_argument("--count", type=int, default=5, help="số seed")
     p.add_argument("--opponents", default="greedy,sample,sample")
     p.add_argument("--out", default=None, help="ghi báo cáo JSON")
     common(p)
+    iteration_budget(p, None, None)
     p.set_defaults(func=cmd_bench)
+
+    p = sub.add_parser("ab", help="so hai bộ trọng số của bot trong cùng trận nhiều đội")
+    p.add_argument("--a", default="", help="trọng số của A, ví dụ fuel_bonus=0.2 (trống = mặc định)")
+    p.add_argument("--b", default="", help="trọng số của B, ví dụ fuel_bonus=2,near_chain=0.4")
+    p.add_argument("--maps", default="sample_16,sample_24,sample_32,random16,random20,random24,random28,random32",
+                   help="tên map (sample_*, random<cỡ>) hoặc đường dẫn JSON, cách nhau bằng dấu phẩy")
+    p.add_argument("--count", type=int, default=6, help="số seed mỗi map")
+    p.add_argument("--seed", type=int, default=0, help="seed đầu tiên")
+    p.add_argument("--opponents", default="search,search,greedy,sample",
+                   help="đối thủ cùng trận: search (bot ta, trọng số mặc định), greedy, sample, wait")
+    p.add_argument("--players", type=int, default=0,
+                   help="mẫu số khi tính lưu lượng; mặc định bằng số đội trong trận")
+    p.add_argument("--out", default=None, help="ghi báo cáo JSON")
+    iteration_budget(p, 1000, 100)
+    p.set_defaults(func=cmd_ab)
 
     p = sub.add_parser("serve", help="mở server luyện tập tại chỗ")
     p.add_argument("--map", default=None)
@@ -540,7 +601,26 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _utf8_streams() -> None:
+    """In tiếng Việt không vỡ khi stdout/stderr bị chuyển hướng ra file hay pipe.
+
+    Trên Windows, stream bị chuyển hướng dùng bảng mã ANSI (cp1252) nên print tiếng
+    Việt ném UnicodeEncodeError; console hay chế độ PYTHONUTF8 thì đã là UTF-8.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        encoding = (getattr(stream, "encoding", None) or "").lower().replace("-", "")
+        if reconfigure is not None and encoding != "utf8":
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except (ValueError, OSError):
+                pass
+
+
 def main(argv: Optional[List[str]] = None) -> int:
+    _utf8_streams()
+    # Windows: nút Dừng của web gửi Ctrl-Break cho bot con; coi nó như Ctrl-C
+    install_break_as_interrupt()
     parser = build_parser()
     args = parser.parse_args(argv)
     return args.func(args)

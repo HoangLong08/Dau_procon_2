@@ -37,16 +37,20 @@ class SearchBot(Bot):
 
     def __init__(self, config: MatchConfig, search_seconds: float = 1.0,
                  role_seconds: float = 5.0, seed: int = 0, weights: Optional[Weights] = None,
-                 kinds: Optional[Sequence[int]] = None, emit=None):
+                 kinds: Optional[Sequence[int]] = None, emit=None,
+                 search_iterations: Optional[int] = None, role_iterations: Optional[int] = None):
         self.config = config
         self.seed = seed
         self.fixed_kinds = list(kinds) if kinds is not None else None
         self.role_seconds = role_seconds
         #: web trực quan hoá: hàm emit(kind, data) hoặc None
         self.emit = emit
+        #: số giây từ đầu ngày tới lần gửi bài cuối cùng (thời gian phản hồi, tiêu chí 4)
+        self.last_response_seconds: Optional[float] = None
         self.strategist = MatchStrategist(
             config, weights=weights, search_seconds=search_seconds,
             net_margin=0.0, role_seconds=role_seconds, seed=seed, emit=emit,
+            search_iterations=search_iterations, role_iterations=role_iterations,
         )
 
     def select_roles(self) -> List[int]:
@@ -56,17 +60,19 @@ class SearchBot(Bot):
         return self.strategist.select_roles()
 
     def plan(self, state: DayState) -> List[List[int]]:
-        if self.emit is None:
-            return self.strategist.plan_day(state).plan
         started = time.monotonic()
         count = {"n": 0}
+        self.last_response_seconds = None
 
         def submit(plan: List[List[int]]) -> bool:
-            # offline không có server: mỗi lần strategist "gửi" đều được nhận,
-            # bài cuối cùng mới là bài trọng tài chấm, như luật thật
+            # offline không có server: mỗi lần strategist "gửi" đều được nhận, và bài
+            # cuối cùng mới là bài trọng tài chấm, như luật thật; chính sách gửi lại
+            # (bỏ bài cuối chỉ hơn chút ít) vì thế cũng được chấm đúng như khi thi
             count["n"] += 1
-            self.emit("submit", {"day": state.day, "n": count["n"], "ok": True, "reason": None,
-                                 "elapsed": round(time.monotonic() - started, 3)})
+            self.last_response_seconds = time.monotonic() - started
+            if self.emit is not None:
+                self.emit("submit", {"day": state.day, "n": count["n"], "ok": True, "reason": None,
+                                     "elapsed": round(self.last_response_seconds, 3)})
             return True
 
         return self.strategist.plan_day(state, submit=submit).plan
