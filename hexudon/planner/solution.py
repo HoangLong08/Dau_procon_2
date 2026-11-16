@@ -87,6 +87,14 @@ class Weights:
     rollout_days: float = 3.0
     #: R3: 1 = ngày cuối, đạt cận trên (chuỗi mới, D, Q) của hôm nay thì dừng tìm và gửi ngay
     ub_stop: float = 1.0
+    # --- giao thông (R5, R6). 0 là hành vi trước đó ---
+    #: R6: 1 = dự báo tự hiệu chỉnh mỗi sáng theo đường thật (traffic.ForecastCalibrator).
+    #: Tắt mặc định: dự báo đúng hơn hẳn (72,9% số ô so với 63,8%) nhưng trên 120 cặp ở sảnh
+    #: 10 đội thì D −0,33 ± 0,25, Q −0,63 (báo cáo mục 4.7), giống E5: dự báo đúng không thành điểm
+    traffic_calib: float = 0.0
+    #: R5: chọn vai trò chấm theo 0 = dự báo cũ, 1 = cộng dự báo cũ với giao thông nhiều đội
+    #: (traffic.PRIOR), 2 = chỉ giao thông nhiều đội; > 0 còn chặn 0 xe tiếp khi thiếu xăng
+    role_traffic: float = 1.0
 
 
 @dataclass

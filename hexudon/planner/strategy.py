@@ -6,7 +6,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Set
 from .. import rules
 from ..model import AgentState, DayState, MatchConfig
 from ..simulator import run_day, wait_plan
-from ..traffic import TrafficForecast, counts_from_positions
+from ..traffic import ForecastCalibrator, TrafficForecast, counts_from_positions, parked_stay
 from .decoder import Decoded
 from .engine import make_context, plan_day
 from .objective import lexicographic_gain
@@ -63,6 +63,13 @@ class MatchStrategist:
         #: stay-step của chính đội hôm qua: một nửa cửa sổ hai ngày của luật (cases 2, 8.13)
         self.own_stay_yesterday: Optional[Dict[int, int]] = None
         self.forecast = TrafficForecast(config, n_patrols=max(1, config.n_agents - 1))
+        #: R6: chọn giả định lưu lượng theo đường thật mỗi sáng; None = dự báo cũ
+        self.calibrator: Optional[ForecastCalibrator] = None
+        #: vị trí xe đối thủ sáng hôm qua theo [đội][xe], để nhận ra xe đỗ (parked_stay)
+        self.others_yesterday: Optional[List[List[int]]] = None
+        #: lượt dừng của xe đối thủ thấy sáng nay (mô hình R6) và số xe (dự báo cũ)
+        self.parked_today: Dict[int, int] = {}
+        self._reset_forecast(self.forecast)
         self.predicted_state: Optional[List[AgentState]] = None
         #: bài cuối cùng submit đã nhận trong lần plan_day gần nhất
         self.last_sent: Optional[Decoded] = None
@@ -109,18 +116,43 @@ class MatchStrategist:
             self.config, budget_seconds=budget, weights=self.weights, seed=self.seed, log=self.log, **extra
         )
         self.kinds = kinds
-        self.forecast = TrafficForecast(
+        self._reset_forecast(TrafficForecast(
             self.config,
             n_patrols=max(1, sum(1 for k in kinds if k == rules.PATROL)),
             pop=self.forecast.pop,
-        )
+        ))
         n_cars = sum(1 for k in kinds if k == rules.REFUEL)
         self.log(f"chọn vai trò: {n_cars} xe tiếp nhiên liệu / {len(kinds)} agent -> {kinds}")
         if emit is not None:
             emit("roles_chosen", {"kinds": list(kinds)})
         return kinds
 
+    def _reset_forecast(self, forecast: TrafficForecast) -> None:
+        """Đặt dự báo của trận; R6 bật thì kèm calibrator mới, mô hình ban đầu là PRIOR."""
+        self.forecast = forecast
+        if self.weights.traffic_calib > 0:
+            self.calibrator = ForecastCalibrator(forecast)
+            forecast.model = self.calibrator.best()
+        else:
+            self.calibrator = None
+            forecast.model = None
+
     # ---- mỗi ngày ----
+
+    def _observe_morning(self, state: DayState, status: Dict[int, int], steps: int) -> None:
+        """Xe đỗ của đối thủ sáng nay, và (R6) chấm lại các mô hình dự báo theo đường thật."""
+        others = [[a.pos for a in team] for team in state.others]
+        road = self.config.road_cells
+        self.parked_today = parked_stay(self.others_yesterday, others, road, status, steps) if others else {}
+        if self.calibrator is None:
+            return
+        before = self.forecast.model
+        model = self.calibrator.morning(
+            state.day, status, parked=self.parked_today, steps=steps,
+            counts=counts_from_positions([p for team in others for p in team], road))
+        self.forecast.model = model
+        if model != before:
+            self.log(f"ngày {state.day + 1}: dự báo giao thông theo mô hình \"{model.label()}\"")
 
     def budget_for(self, state: DayState, now: Optional[float] = None) -> float:
         """Ngân sách tìm kiếm, chừa lề cho mạng.
@@ -171,10 +203,21 @@ class MatchStrategist:
             self.log(f"lệch vai trò: ta {self.kinds}, server {server_kinds}; theo server")
             self.kinds = list(server_kinds)
         status = dict(state.road_status)
-        forecast_status = self.forecast.predict(
-            status, self.status_yesterday, own_stay_yesterday=self.own_stay_yesterday,
-            floor_today=state.day == 1,
-        )
+        steps_today = steps_override or state.steps or cfg.steps_of_day(state.day)
+        self._observe_morning(state, status, steps_today)
+        if self.calibrator is not None:
+            # vết hôm nay của ta chưa có (đang lập kế hoạch): tạm lấy vết hôm qua, vì số
+            # hạng "các đội khác như ta" của hôm nay lớn gấp (số đội − 1) lần vết của ta
+            forecast_status = self.forecast.predict(
+                status, self.status_yesterday, own_stay_today=self.own_stay_yesterday,
+                own_stay_yesterday=self.own_stay_yesterday, parked_stay=self.parked_today,
+                floor_today=state.day == 1,
+            )
+        else:
+            forecast_status = self.forecast.predict(
+                status, self.status_yesterday, own_stay_yesterday=self.own_stay_yesterday,
+                floor_today=state.day == 1,
+            )
         ctx = make_context(
             cfg, state.day, agents, status, [s.stocks for s in cfg.spots],
             self.visited_brands, weights=self.weights, forecast_status=forecast_status,
@@ -321,7 +364,11 @@ class MatchStrategist:
             opponents_parked=counts_from_positions(opponents, self.config.road_cells),
             steps_today=state.steps or self.config.steps_of_day(state.day),
             floor_today=state.day == 1,
+            parked_stay=self.parked_today,
         )
+        if self.calibrator is not None:
+            self.calibrator.evening(state.day, result.stay)
+        self.others_yesterday = [[a.pos for a in team] for team in state.others]
         self.own_stay_yesterday = dict(result.stay)
         if self.emit is not None and state.day + 1 < self.config.n_days:
             from ..viz.shapes import status_payload

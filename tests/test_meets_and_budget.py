@@ -11,7 +11,7 @@ from hexudon.planner.alns import DESTROY_FUNCS, _remove_stops
 from hexudon.planner.construct import InsertionState, repair
 from hexudon.planner.decoder import decode
 from hexudon.planner.engine import make_context
-from hexudon.planner.roles import select_roles
+from hexudon.planner.roles import select_roles, zero_cars_allowed
 from hexudon.planner.solution import DaySolution, Meet
 from hexudon.planner.strategy import MatchStrategist
 from hexudon.simulator import run_day
@@ -127,7 +127,9 @@ class IterationBudgetTest(unittest.TestCase):
         first, options = select_roles(config, budget_seconds=0.0, seed=2, iterations_per_day=10)
         again, _ = select_roles(config, budget_seconds=0.0, seed=2, iterations_per_day=10)
         self.assertEqual(first, again)
-        self.assertTrue(all(c.evaluated for c in options), "mọi phương án phải được chấm, không bị cắt giờ")
+        # R5: phương án 0 xe tiếp bị loại có chủ đích khi xăng không dư (zero_cars_allowed)
+        self.assertTrue(all(c.evaluated for c in options if c.n_cars > 0 or zero_cars_allowed(config)),
+                        "mọi phương án phải được chấm, không bị cắt giờ")
 
 
 class BenchToolsTest(unittest.TestCase):

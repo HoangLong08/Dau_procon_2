@@ -7,7 +7,7 @@ Python thuần, **không cài gì thêm** — chỉ thư viện chuẩn. Yêu c�
 
 ```bash
 git clone <repo> && cd procon-2026
-python -m unittest discover -s tests     # 298 test, phải xanh toàn bộ (Windows, macOS, Linux)
+python -m unittest discover -s tests     # 321 test, phải xanh toàn bộ (Windows, macOS, Linux)
 ```
 
 ---
@@ -241,6 +241,14 @@ phương án rồi chọn phương án điểm cao nhất. Phương án nào ch�
 bị loại, thay vì đem so với phương án chơi đủ — so lẫn lộn làm việc *tăng* ngân
 sách đôi khi lại cho kết quả *tệ hơn*.
 
+Từ 17/11/2026 (R5), mỗi phương án được chơi thử trên **hai kịch bản giao thông**:
+dự báo cũ, và "nhiều đội" (mọi đội cùng chơi, một nửa số đội khác đi như ta). Điểm
+hai kịch bản được cộng lại. Chơi một mình thì đường luôn thông, nên rollout từng đòi
+2 xe tiếp ở bản đồ Nhật trận 3. Không chọn 0 xe tiếp, trừ khi xăng ≥ 3 × số bước ngày
+đầu và trận không quá 5 ngày. Cửa sổ chọn xe còn từ 6 giây thì 3 phương án dẫn đầu
+được tinh chỉnh song song trên nhiều tiến trình. Đo trên 120 cặp ở sảnh 10 đội: D
++0,16, Q +0,6 mỗi trận, không trận nào mất L (`role_traffic = 0` là như cũ).
+
 **3. Tiếp nhiên liệu bằng điểm hẹn.** Điểm hẹn đặt ngay trên lộ trình xe tuần tra;
 xe tiếp nhiên liệu tới trước và đợi. Trong cùng một bước, simulator **trừ xăng trước**
 rồi mới **nạp sau** (theo ví dụ 8 tác nhân của BTC Nhật), nên xe đi kèm xe tiếp luôn
@@ -259,6 +267,13 @@ qua**, rồi dùng dự báo đó cho giá trị cuối ngày. Ở ngày 2, dự
 bao giờ tốt hơn tình trạng hôm nay, vì lưu lượng ngày 3 gồm cả vết ngày 1 lẫn ngày 2.
 Ngày 0 mọi đường đều thông thoáng nên bot khai thác đường mạnh; các ngày sau nó tránh
 dần những hành lang đang xấu đi.
+
+Có sẵn **dự báo tự hiệu chỉnh** (R6, `traffic_calib = 1`). Mỗi sáng, bot so 18 giả
+định lưu lượng của các đội khác với đường thật rồi chọn giả định đúng nhất. Giả định
+gồm: "như ta" theo nhiều tỉ lệ, theo độ phổ biến, "mai như hôm nay", và công thức cũ.
+Bot cũng tính vết xe đỗ của đối thủ. Ở sảnh 10 đội, dự báo này đúng 72,9% số ô so với
+63,8% của công thức cũ. Tuy vậy nó không thêm điểm (D −0,33 ± 0,25 trên 120 cặp), nên
+**tắt mặc định**.
 
 **5. Tìm kiếm ALNS trên nghiệm "lộ trình spot + điểm hẹn".** Bộ giải mã là **toàn
 phần**: mọi nghiệm, kể cả nghiệm vô lý, đều ra kế hoạch mà simulator chấp nhận theo
@@ -437,7 +452,7 @@ Ba mức, từ nhanh tới giống ngày thi nhất. Mọi lệnh chạy ở th�
 ### 6.1. Test tự động (khoảng 2 phút, không cần mạng)
 
 ```bash
-python -m unittest discover -s tests      # phải ra: Ran 298 tests ... OK
+python -m unittest discover -s tests      # phải ra: Ran 321 tests ... OK
 ```
 
 ### 6.2. Tập dượt trên máy bằng server giả (không cần mạng, không cần token thật)
