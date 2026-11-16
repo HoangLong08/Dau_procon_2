@@ -7,7 +7,7 @@ Python thuần, **không cài gì thêm** — chỉ thư viện chuẩn. Yêu c�
 
 ```bash
 git clone <repo> && cd procon-2026
-python -m unittest discover -s tests     # 262 test, phải xanh toàn bộ (Windows, macOS, Linux)
+python -m unittest discover -s tests     # 285 test, phải xanh toàn bộ (Windows, macOS, Linux)
 ```
 
 ---
@@ -123,6 +123,7 @@ python -m hexudon roles --map data/sample_maps/sample_32.json
 
 | Lệnh | Dùng khi nào |
 |---|---|
+| `api-check` | so `/openapi.json` của server thi với 12 endpoint bot dùng (không cần token); báo endpoint mới |
 | `games` | liệt kê trận/câu trên server thi, kèm ID và trạng thái |
 | `web` | chơi trên server thi: một câu, nhiều đội (`--token-env` lặp lại), hoặc cả trận (`--follow`) |
 | `web-bench` | chạy loạt câu practice trên server thi, so điểm với đội khác |
@@ -181,7 +182,13 @@ vì việc chọn vai trò chạy trong khi các ngày đó mở rồi đóng.
   `{"problem": {...}}` của server giả lập Nhật
 
 Đối thủ nội bộ (`--bots`, `--opponents`): `search` (chính bot này), `greedy` (chỉ
-bộ dựng nghiệm, không tìm kiếm), `sample` (bot mẫu), `wait` (đứng yên).
+bộ dựng nghiệm, không tìm kiếm), `sample` (bot mẫu), `wait` (đứng yên). Thêm các kiểu
+đội khác giả lập theo repo công khai của các đội (`hexudon/offline/opponents.py`):
+`nearest` (spot gần nhất, toàn xe tuần tra), `chain_greedy` (tham lam theo chuỗi, xe
+tiếp đuổi xe ít xăng nhất), `escort` (mỗi xe tiếp đi kèm một xe tuần tra), `hub` (một
+xe tiếp đứng ở trạm trung tâm), `road_block` (xe tiếp đỗ chặn ô đường, chỉ để thử
+phòng thủ), `servings_alns` (ALNS gần như chỉ tối đa số phần) và `all_patrol` (ALNS
+toàn xe tuần tra).
 
 Lưu lượng đường chia cho **số đội thật trong trận**, tức số bot, không phải `players`
 ghi trong map mẫu (ba map mẫu ghi 10). Với `sim`, `--players` lớn hơn số bot giả lập
@@ -221,6 +228,13 @@ phần udon. Cộng thêm giá trị cuối ngày: chuỗi chưa ghé mà sắp 
 phạt nặng; kết thúc ngày trên spot hoặc gần chuỗi chưa ghé thì được thưởng; xe sắp
 kẹt xăng (xăng ít hơn mức cần để rời **ô đang đứng**) bị phạt theo số ngày còn lại.
 
+**L cứng (từ 16/11/2026).** Spot của chuỗi chưa từng thu luôn được xét khi chèn, dù
+xa hơn 10 spot gần nhất. Chuỗi mới được chèn trước, chuỗi khó chèn nhất đi đầu
+(regret). Sau tìm kiếm còn một bước vá L: chuỗi mới tới được hôm nay mà bài bỏ qua thì
+được chèn lại. Chuỗi chưa thu mà xe gần nhất đã xa hơn nửa số bước còn lại của trận
+thì bị phạt bằng một chuỗi mới. Trước đó, giải đấu giả lập đo được bot bỏ sót chuỗi
+chỉ có một spot ở góc bản đồ (2/30 trận trên bản đồ tập dượt Nhật).
+
 **2. Chọn vai trò bằng mô phỏng, trước ngày 0.** Thử các phương án 0, 1, 2, 3 xe
 tiếp nhiên liệu ở những vị trí trung tâm khác nhau, **chơi thử trọn trận** từng
 phương án rồi chọn phương án điểm cao nhất. Phương án nào chưa chơi đủ số ngày thì
@@ -252,7 +266,9 @@ cả hai cách hiểu luật xăng — đã fuzz khoảng 1.900 ca đối kháng
 từ chối (server thật có thể khác ở chỗ simulator chưa mô tả đúng; xem đối chiếu
 replay). Nghiệm nào không sửa nổi thành hợp lệ thì bị chấm điểm tệ nhất chứ không
 bao giờ được chọn. ALNS bắt đầu từ chính bài an toàn, nên bài cuối không kém nó, và
-chỉ nhận nghiệm kém nghiệm tốt nhất không quá 0,25 B.
+chỉ nhận nghiệm kém nghiệm tốt nhất không quá 0,25 B. Từ 16/11/2026, 30% ngân sách
+cuối ngày là **pha Q**: khoá (chuỗi mới, D) hôm nay, chỉ nhận nghiệm kém không quá 2
+phần, và chỉ gửi lại khi (L, D, Q) hôm nay tăng ngặt.
 
 ### Cách chia thời gian trong một ngày
 
@@ -340,7 +356,8 @@ xét thời gian phản hồi và lưu lượng chia cho 10 đội).
 1. Nếu định đổi mật khẩu trên website thì đổi **trước**, rồi mới lấy token (icon 🔑).
 2. Dán token vào `TOKEN=` trong `.env`.
 3. `python -m unittest discover -s tests` — phải xanh toàn bộ.
-4. `python -m hexudon games --live` — thấy trận thi, ID trận và các câu.
+4. `python -m hexudon api-check` — phải in "đủ endpoint"; báo THIẾU hoặc LỆCH thì sửa client trước khi thi.
+5. `python -m hexudon games --live` — thấy trận thi, ID trận và các câu.
 
 ### Trong giờ thi
 
@@ -412,7 +429,7 @@ Ba mức, từ nhanh tới giống ngày thi nhất. Mọi lệnh chạy ở th�
 ### 6.1. Test tự động (khoảng 2 phút, không cần mạng)
 
 ```bash
-python -m unittest discover -s tests      # phải ra: Ran 262 tests ... OK
+python -m unittest discover -s tests      # phải ra: Ran 285 tests ... OK
 ```
 
 ### 6.2. Tập dượt trên máy bằng server giả (không cần mạng, không cần token thật)
@@ -561,3 +578,7 @@ là 0,25 B cố định. Điểm thứ tư (kế hoạch tiếp nhiên liệu r�
    Nhật: xe đứng sẵn trên spot đầu ngày vẫn thu ở bước 1, và xe được nạp giữa lúc đang
    đi vẫn hợp lệ. Lần đầu chơi practice trên server thật có xe như vậy, xem dòng đối
    chiếu replay: `khớp hoàn toàn` nghĩa là server cũng làm như ví dụ.
+3. Lộ trình tiếp theo (R3–R7) và số liệu giải đấu giả lập với 10 kiểu đội khác nằm ở
+   báo cáo `de-xuat-chien-thuat/phan-tich-va-de-xuat-chien-thuat.md` (thư mục gốc của
+   dự án, ngoài repo này). Ngày 16/11/2026, practice Q1 và một câu Mock Contest trên
+   server thật đều khớp replay 10/10 ngày.

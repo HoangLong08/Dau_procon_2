@@ -7,6 +7,9 @@ from ..simulator import DayResult
 from .solution import DayContext
 
 INF = float("inf")
+#: R1: chuỗi chưa thu mà xe gần nhất cuối ngày đã xa hơn tỉ lệ này của số bước còn lại
+#: cả trận thì bị phạt w.deadline × new_brand_value (một bước trước khi thành không thể)
+DEADLINE_MARGIN = 0.5
 
 
 def _dist_to_brand(ctx: DayContext, cell: int, brand: int) -> float:
@@ -43,6 +46,8 @@ def end_value(ctx: DayContext, result: DayResult) -> float:
             value -= w.cover_penalty * B
         else:
             value -= w.urgency * B * min(1.0, best / max(1, steps_rest))
+            if w.deadline > 0 and best > DEADLINE_MARGIN * steps_rest:
+                value -= w.deadline * ctx.new_brand_value
 
     # V_spot: kết thúc trên spot thì hôm sau thu miễn phí ở bước 1
     spot_at = cfg.spot_index_at

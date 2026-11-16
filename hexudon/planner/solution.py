@@ -57,6 +57,25 @@ class Weights:
     fuel_bonus: float = 1.0
     road_park: float = 0.05         # × B, phạt stay-step trên đường của chính mình
     diag_penalty: float = 0.01      # × B, phạt tour bị cắt / điểm hẹn bị bỏ
+    # --- L cứng (R1, 16/11/2026). Đặt new_chain_first=0, deadline=0 là hành vi cũ ---
+    #: 1 = xét spot của chuỗi chưa thu ngoài NEAR_K, chèn chúng trước theo regret, và vá L
+    #: sau ALNS. Bản cũ chỉ xét 10 spot gần điểm neo nên bỏ sót chuỗi một-spot ở xa
+    new_chain_first: float = 1.0
+    #: × new_brand_value, cho chuỗi chưa thu mà xe gần nhất cuối ngày đã xa hơn
+    #: DEADLINE_MARGIN × số bước còn lại của trận: kéo xe về phía nó trước khi quá muộn
+    deadline: float = 1.0
+    # --- pha Q (R2). q_share=0 là hành vi cũ ---
+    #: phần ngân sách (vòng hoặc giây) cho pha 2: khoá (chuỗi mới, D) hôm nay rồi tối đa Q
+    q_share: float = 0.3
+    #: hệ số nhân các hạng mục cuối ngày "mềm" trong pha 2 (urgency, end_on_spot,
+    #: near_chain, fuel_bonus, road_park); cover_penalty, strand, deadline giữ nguyên
+    q_end_scale: float = 0.1
+    #: dải chấp nhận RRT của pha 2, tính theo số phần (× serving)
+    q_band: float = 2.0
+    #: > 0: trong pha 2 thu B về giá trị này (như bot servings_alns, B = 0,05) để phép chèn
+    #: ưu tiên số phần; (chuỗi mới, D) vẫn bị khoá bằng accept, còn cover_penalty, strand,
+    #: deadline được nhân bù để giữ nguyên độ lớn tuyệt đối. 0 = giữ B như pha 1
+    q_B: float = 0.0
 
 
 @dataclass

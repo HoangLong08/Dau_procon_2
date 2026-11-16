@@ -302,6 +302,13 @@ def cmd_web(args) -> int:
         return 130
 
 
+def cmd_api_check(args) -> int:
+    """So /openapi.json của server thi với các endpoint client dùng (không cần token)."""
+    from .client import api_check
+
+    return api_check.run(args.url, timeout=args.timeout, log=_log)
+
+
 def cmd_web_bench(args) -> int:
     """Chạy loạt câu practice trên server thi và so điểm với các đội khác."""
     from .client import web_runner
@@ -560,6 +567,11 @@ def build_parser() -> argparse.ArgumentParser:
     web_common(p)
     p.add_argument("--token-env", default=None, help="tên biến token trong .env (mặc định TEST_DAU_01)")
     p.set_defaults(func=cmd_games)
+
+    p = sub.add_parser("api-check", help="so /openapi.json của server thi với các endpoint bot dùng")
+    p.add_argument("--url", default=DEFAULT_URL, help="server thi (mặc định %(default)s)")
+    p.add_argument("--timeout", type=float, default=10.0)
+    p.set_defaults(func=cmd_api_check)
 
     p = sub.add_parser("web", help="chơi trên server thi hexudon.hairbui76.id.vn")
     web_common(p)

@@ -224,15 +224,23 @@ def improve(
     on_better: Optional[Callable[[DaySolution, Decoded], None]] = None,
     on_progress: Optional[Callable[[dict], None]] = None,
     progress_every: float = 0.25,
+    band: Optional[float] = None,
+    accept: Optional[Callable[[Decoded], bool]] = None,
+    rng_salt: int = 0,
 ) -> AlnsResult:
     """Chạy ALNS tới hạn chót. Luôn trả về một nghiệm hợp lệ.
 
     `on_progress`, nếu có, nhận khoảng mỗi `progress_every` giây (và một lần cuối)
     số vòng lặp, điểm hiện tại, điểm tốt nhất và trọng số toán tử. Nó không đụng
     tới rng nên không đổi kết quả tìm kiếm.
+
+    `band` thay dải chấp nhận RRT mặc định (RRT_BAND × B). `accept`, nếu có, loại
+    hẳn nghiệm không đạt (coi như điểm −∞): pha Q dùng nó để giữ (chuỗi mới, D).
+    `rng_salt` đổi dòng ngẫu nhiên cho lần gọi thứ hai trong cùng một ngày.
     """
-    rng = random.Random((seed << 8) ^ (ctx.day + 1))
+    rng = random.Random(((seed << 8) ^ (ctx.day + 1)) + (rng_salt << 20))
     began = time.monotonic()
+    rrt = RRT_BAND * ctx.weights.B if band is None else band
     cur = start.copy() if start is not None else construct(ctx, rng)
     cur_dec = decode(ctx, cur)
     best, best_dec = cur.copy(), cur_dec
@@ -267,6 +275,8 @@ def improve(
         cand = repair(ctx, cand, rng, mode=r_name)
         cand_dec = decode(ctx, cand)
         s = cand_dec.score
+        if accept is not None and not accept(cand_dec):
+            s = float("-inf")
 
         if s > best_dec.score:
             best, best_dec = cand.copy(), cand_dec
@@ -281,7 +291,7 @@ def improve(
             destroy.award(d_name, REWARD_BETTER)
             repair_ops.award(r_name, REWARD_BETTER)
             since_best += 1
-        elif s >= best_dec.score - RRT_BAND * ctx.weights.B:
+        elif s >= best_dec.score - rrt:
             cur, cur_dec = cand, cand_dec
             destroy.award(d_name, REWARD_ACCEPT)
             repair_ops.award(r_name, REWARD_ACCEPT)
@@ -298,6 +308,8 @@ def improve(
             cur = destroy_random(ctx, best.copy(), rng, max(2, max_stops // 2))
             cur = repair(ctx, cur, rng, mode="coverage")
             cur_dec = decode(ctx, cur)
+            if accept is not None and not accept(cur_dec):
+                cur, cur_dec = best.copy(), best_dec
             since_best = 0
 
         if on_progress is not None and time.monotonic() >= next_progress:

@@ -46,6 +46,9 @@ class InsertionState:
         self.tour_fuel: List[float] = []
         self.targeted: Dict[int, int] = {}
         self.covered: Dict[int, int] = {}
+        #: R1: spot của chuỗi chưa từng thu trong trận và nghiệm chưa phủ; luôn là ứng viên
+        self.new_chain = ctx.weights.new_chain_first > 0
+        self._new_spots: Tuple[int, ...] = ()
         self._recompute()
 
     def _cells_of(self, slot: int) -> List[int]:
@@ -78,6 +81,24 @@ class InsertionState:
                 self.covered[brand] = self.covered.get(brand, 0) + 1
             self.tour_steps.append(steps)
             self.tour_fuel.append(fuel)
+        self._refresh_new_spots()
+
+    def _refresh_new_spots(self) -> None:
+        if not self.new_chain:
+            return
+        ctx = self.ctx
+        out = []
+        for brand, spots in ctx.config.spots_by_brand.items():
+            if brand in ctx.visited_brands or self.covered.get(brand, 0) > 0:
+                continue
+            out.extend(spots)
+        self._new_spots = tuple(out)
+
+    def uncovered_new_brands(self) -> List[int]:
+        """Chuỗi chưa từng thu trong trận mà nghiệm này chưa ghé."""
+        ctx = self.ctx
+        return [b for b in ctx.config.brands
+                if b not in ctx.visited_brands and self.covered.get(b, 0) == 0]
 
     def gain_of(self, spot: int) -> float:
         ctx = self.ctx
@@ -129,11 +150,67 @@ class InsertionState:
         self.targeted[spot] = self.targeted.get(spot, 0) + 1
         brand = self.ctx.spot_brand[spot]
         self.covered[brand] = self.covered.get(brand, 0) + 1
+        if self._new_spots and self.covered[brand] == 1:
+            self._refresh_new_spots()
 
     def candidate_spots(self, slot: int, pos: int) -> Tuple[int, ...]:
         cells = self._cells_of(slot)
         anchor = cells[pos - 1] if pos > 0 else self.ctx.start_of_patrol(slot)
-        return self.near.of(anchor)
+        near = self.near.of(anchor)
+        if not self._new_spots:
+            return near
+        # spot của chuỗi mới cả trận luôn được xét, dù xa hơn NEAR_K spot gần nhất (R1)
+        extra = tuple(s for s in self._new_spots if s not in near)
+        return near + extra if extra else near
+
+    def best_new_chain_insertion(self):
+        """R1: chèn trước chuỗi mới cả trận khó chèn nhất (regret theo số bước).
+
+        Mỗi chuỗi chưa thu: mọi phép chèn khả thi trên mọi spot của nó. Chuỗi chỉ còn
+        một phương án có regret vô hạn; còn lại regret = Δbước thứ hai − Δbước tốt
+        nhất. Trả phép chèn rẻ nhất của chuỗi có regret lớn nhất, hoặc None.
+        """
+        ctx = self.ctx
+        in_tour = [set(t) for t in self.sol.tours]
+        best = None
+        best_key = None
+        for brand in self.uncovered_new_brands():
+            options = []
+            for spot in ctx.config.spots_by_brand.get(brand, ()):
+                for slot in range(ctx.n_patrols):
+                    if spot in in_tour[slot]:
+                        continue
+                    for pos in range(len(self.sol.tours[slot]) + 1):
+                        d = self.delta(slot, pos, spot)
+                        if d is None:
+                            continue
+                        dsteps, dfuel = d
+                        if not self.feasible(slot, dsteps, dfuel):
+                            continue
+                        options.append((dsteps, slot, pos, spot, dfuel))
+            if not options:
+                continue
+            options.sort()
+            regret = INF if len(options) == 1 else options[1][0] - options[0][0]
+            key = (regret, -options[0][0])
+            if best_key is None or key > best_key:
+                dsteps, slot, pos, spot, dfuel = options[0]
+                best_key = key
+                best = (slot, pos, spot, dsteps, dfuel)
+        return best
+
+    def insert_new_chains(self, max_inserts: int) -> int:
+        """Chèn hết chuỗi mới chèn được; trả số phép chèn đã làm."""
+        if not self.new_chain:
+            return 0
+        done = 0
+        while done < max_inserts:
+            best = self.best_new_chain_insertion()
+            if best is None:
+                break
+            self.apply(*best)
+            done += 1
+        return done
 
     def best_insertion(self, rng: Optional[random.Random] = None,
                        coverage_first: bool = False, regret: int = 0):
@@ -245,7 +322,7 @@ def construct(ctx: DayContext, rng: Optional[random.Random] = None,
               max_inserts: int = 400, coverage_first: bool = True) -> DaySolution:
     """Nghiệm khởi tạo: phủ chuỗi trước, rồi tham lam theo lợi ích trên chi phí."""
     state = InsertionState(ctx)
-    inserts = 0
+    inserts = state.insert_new_chains(max_inserts)
     if coverage_first:
         while inserts < max_inserts:
             best = state.best_insertion(rng=rng, coverage_first=True)
@@ -266,7 +343,7 @@ def repair(ctx: DayContext, sol: DaySolution, rng: random.Random, mode: str = "g
            max_inserts: int = 200) -> DaySolution:
     """Sửa nghiệm sau khi phá: chèn lại cho tới khi hết chỗ."""
     state = InsertionState(ctx, sol)
-    inserts = 0
+    inserts = state.insert_new_chains(max_inserts)
     coverage_first = mode == "coverage"
     regret = 3 if mode == "regret" else 0
     if coverage_first:
