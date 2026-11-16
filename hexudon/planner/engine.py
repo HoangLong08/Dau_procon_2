@@ -6,7 +6,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from ..model import AgentState, MatchConfig
 from ..pathing import DayGraph, DistTable, LegBook
-from .alns import _remove_stops, improve
+from .alns import Elite, _remove_stops, improve
 from .construct import InsertionState, construct
 from .decoder import Decoded, decode
 from .objective import lexicographic_gain, score_day
@@ -139,6 +139,80 @@ def ensure_new_chains(ctx: DayContext, sol: DaySolution, decoded: Decoded) -> Tu
     return best_sol, best_dec
 
 
+def day_upper_bound(ctx: DayContext) -> Tuple[int, int, int]:
+    """Cận trên (chuỗi mới, D, Q) của hôm nay (R3).
+
+    Một spot tới được nếu một xe tuần tra đi tới trong số bước của ngày, và (khi đội
+    không có xe tiếp) đủ xăng theo đường ít xăng nhất. Q ≤ Σ min(kho, số xe tới được),
+    vì mỗi xe thu tối đa một phần mỗi spot mỗi ngày.
+    """
+    has_car = ctx.n_cars > 0
+    reach = [0] * len(ctx.spot_cells)
+    for slot in range(ctx.n_patrols):
+        start = ctx.start_of_patrol(slot)
+        fuel = ctx.fuel_of_patrol(slot)
+        for si, cell in enumerate(ctx.spot_cells):
+            if ctx.dist_step.cost(start, cell) > ctx.steps:
+                continue
+            if not has_car and ctx.book.min_fuel(start, cell) > fuel:
+                continue
+            reach[si] += 1
+    brands = {ctx.spot_brand[si] for si, n in enumerate(reach) if n}
+    servings = sum(min(ctx.stocks[si], n) for si, n in enumerate(reach))
+    return (len(brands - ctx.visited_brands), len(brands), servings)
+
+
+def variant_weights(w: Weights) -> List[Weights]:
+    """Trọng số của hai lượt ALNS biến thể tạo ứng viên cho rollout (R4), như E2:
+    tiết kiệm xăng (fuel_bonus × 2) và coi trọng cuối ngày (các hạng mục cuối ngày × 2)."""
+    end_x2 = {k: getattr(w, k) * 2 for k in SOFT_END_TERMS + ("strand",)}
+    return [dataclasses.replace(w, fuel_bonus=w.fuel_bonus * 2), dataclasses.replace(w, **end_x2)]
+
+
+def pick_by_lookahead(ctx: DayContext, best_sol: DaySolution, best_dec: Decoded, elite: Optional[Elite],
+                      lookahead: Callable[[Decoded], Tuple[int, int, int]],
+                      deadline: Optional[float] = None,
+                      extra: Sequence[Tuple[DaySolution, Decoded]] = ()) -> Tuple[DaySolution, Decoded, str, dict]:
+    """R4: trong nghiệm tốt nhất và các nghiệm của `elite`, chọn nghiệm có (chuỗi mới, D, Q)
+    của hôm nay cộng `lookahead` (các ngày sau) lớn nhất; hoà thì theo điểm.
+
+    Không nhận nghiệm có ít chuỗi mới hôm nay hơn nghiệm tốt nhất (L cứng, R1). Hết giờ
+    giữa chừng thì chọn trong số đã chấm. Trả thêm "rollout" nếu đổi khỏi nghiệm tốt nhất,
+    và info = {"worst": giây của lần chơi tiếp chậm nhất, "total": tổng của bài được chọn}.
+    """
+    base_new = lexicographic_gain(ctx, best_dec.result)[0]
+    cands = [(best_sol, best_dec)]
+    seen = {tuple(tuple(seq) for seq in best_dec.plan)}
+    pool = list(extra) + (elite.entries() if elite is not None else [])
+    for sol, dec in pool:
+        if not dec.result.ok or lexicographic_gain(ctx, dec.result)[0] < base_new:
+            continue
+        key = tuple(tuple(seq) for seq in dec.plan)
+        if key in seen:
+            continue
+        seen.add(key)
+        cands.append((sol, dec))
+    info = {"worst": 0.0, "total": None}
+    if len(cands) == 1:
+        return best_sol, best_dec, "", info
+    scored = []
+    for idx, (sol, dec) in enumerate(cands):
+        # chỉ chấm thêm khi còn kịp một lần chơi tiếp nữa (đo bằng lần chậm nhất đã chạy)
+        if idx > 0 and deadline is not None and time.monotonic() + info["worst"] >= deadline:
+            break
+        t0 = time.monotonic()
+        future = lookahead(dec)
+        info["worst"] = max(info["worst"], time.monotonic() - t0)
+        today = lexicographic_gain(ctx, dec.result)
+        total = tuple(a + b for a, b in zip(today, future))
+        scored.append((total, dec.score, -idx, sol, dec))
+    total, _, neg_idx, sol, dec = max(scored, key=lambda x: (x[0], x[1], x[2]))
+    info["total"] = total
+    if neg_idx == 0:
+        return best_sol, best_dec, "", info
+    return sol, dec, "rollout", info
+
+
 def plan_day(
     ctx: DayContext,
     deadline: Optional[float] = None,
@@ -148,6 +222,7 @@ def plan_day(
     on_better: Optional[Callable[[Decoded], None]] = None,
     on_progress: Optional[Callable[[dict], None]] = None,
     on_improve: Optional[Callable[[Decoded], None]] = None,
+    lookahead: Optional[Callable[[Decoded], Tuple[int, int, int]]] = None,
 ) -> Decoded:
     """Lập kế hoạch một ngày: gửi bài an toàn trước, rồi cải thiện tới hạn chót.
 
@@ -163,6 +238,11 @@ def plan_day(
     nhân q_end_scale. Trong pha 2, on_improve chỉ được gọi khi (L, D, Q) hôm nay
     tăng thật, để không gửi lại vì một thay đổi điểm nội bộ. Bài trả về luôn mang
     điểm theo trọng số của ctx. q_share = 0 là đúng hành vi cũ.
+
+    `lookahead` (R4), nếu có và không phải ngày cuối: giữa pha 1 và pha Q, chọn lại
+    trong K nghiệm khác nhau về trạng thái cuối ngày theo kết quả chơi tiếp các ngày
+    sau (pick_by_lookahead), với rollout_share ngân sách giây. Bài chọn như vậy mang
+    picked_by = "rollout". Ngày cuối, đạt cận trên của hôm nay thì dừng ngay (R3).
 
     ALNS bắt đầu từ chính nghiệm an toàn, nên bài cuối không bao giờ kém nó.
     """
@@ -183,13 +263,34 @@ def plan_day(
                 on_improve(decoded)
 
     w = ctx.weights
+    # R3: ngày cuối end_value = 0, nên đạt cận trên của hôm nay là xong: dừng ngay để bài
+    # cuối được gửi sớm (thời gian phản hồi là tiêu chí 4). Ngày khác vẫn tìm tiếp, vì
+    # trạng thái cuối ngày còn cải thiện được và D, Q các ngày sau xếp trên thời gian.
+    stop = None
+    if ctx.days_left == 0 and w.ub_stop > 0:
+        ub = day_upper_bound(ctx)
+        if first.result.ok and lexicographic_gain(ctx, first.result) == ub:
+            return first
+
+        def stop(decoded: Decoded) -> bool:
+            return decoded.result.ok and lexicographic_gain(ctx, decoded.result) == ub
+
     share = min(0.9, max(0.0, w.q_share))
-    if share > 0:
-        iters1 = max(1, int(round(max_iterations * (1.0 - share))))
-        now = time.monotonic()
-        deadline1 = None if deadline is None else now + (1.0 - share) * max(0.0, deadline - now)
+    use_roll = lookahead is not None and w.rollout_k >= 1 and ctx.days_left > 0
+    share_r = min(max(0.0, w.rollout_share), 0.9 - share) if use_roll else 0.0
+    now = time.monotonic()
+    span = None if deadline is None else max(0.0, deadline - now)
+    # vòng ALNS: pha 1 | hai lượt biến thể (R4, nửa share_r) | pha Q (share)
+    iters_var = int(round(max_iterations * share_r / 4)) if use_roll else 0
+    if share > 0 or iters_var:
+        iters1 = max(1, int(round(max_iterations * (1.0 - share))) - 2 * iters_var)
     else:
-        iters1, deadline1 = max_iterations, deadline
+        iters1 = max_iterations
+    if share > 0 or share_r > 0:
+        deadline1 = None if deadline is None else now + (1.0 - share - share_r) * span
+    else:
+        deadline1 = deadline
+    elite = Elite(ctx, int(w.rollout_k)) if use_roll else None
     result = improve(
         ctx,
         start=sol,
@@ -198,6 +299,8 @@ def plan_day(
         seed=seed,
         on_better=better,
         on_progress=on_progress,
+        elite=elite,
+        stop=stop,
     )
     if result.decoded.score > first.score:
         best_sol, best_dec = result.solution, result.decoded
@@ -207,10 +310,32 @@ def plan_day(
     if patched is not best_dec:
         best_sol, best_dec = patched_sol, patched
         better(best_sol, best_dec)
+    reached = stop is not None and stop(best_dec)
 
-    iters2 = max_iterations - iters1
+    # R4: chọn trong các nghiệm khác nhau về trạng thái cuối ngày theo (L, D, Q) của hôm
+    # nay cộng các ngày sau khi chơi tiếp bằng bộ dựng tham lam
+    picked = ""
+    roll = {"worst": 0.0, "total": None}
+    if use_roll and best_dec.result.ok and not reached:
+        extra = []
+        base_new = lexicographic_gain(ctx, best_dec.result)[0]
+        for i, wv in enumerate(variant_weights(w)):
+            dl = None if span is None else now + (1.0 - share - share_r + (i + 1) * share_r / 4) * span
+            if (dl is not None and time.monotonic() >= dl) or (dl is None and iters_var <= 0):
+                continue
+            res_v = improve(dataclasses.replace(ctx, weights=wv), start=best_sol, deadline=dl,
+                            max_iterations=iters_var if iters_var > 0 else max_iterations,
+                            seed=seed, rng_salt=2 + i,
+                            accept=lambda d: d.result.ok and lexicographic_gain(ctx, d.result)[0] >= base_new)
+            if res_v.decoded.result.ok:
+                extra.append((res_v.solution, rescore(ctx, res_v.decoded)))
+        deadline_r = None if span is None else now + (1.0 - share) * span
+        best_sol, best_dec, picked, roll = pick_by_lookahead(ctx, best_sol, best_dec, elite, lookahead,
+                                                             deadline_r, extra=extra)
+
+    iters2 = max_iterations - iters1 - 2 * iters_var
     time_left = deadline is None or time.monotonic() < deadline
-    if share > 0 and iters2 > 0 and time_left and best_dec.result.ok:
+    if share > 0 and iters2 > 0 and time_left and best_dec.result.ok and not reached:
         lock = lexicographic_gain(ctx, best_dec.result)[:2]
         ctx_q = dataclasses.replace(ctx, weights=q_phase_weights(w))
         base_q = score_day(ctx_q, best_dec.result, truncated=best_dec.truncated,
@@ -230,10 +355,12 @@ def plan_day(
         def keeps_lock(decoded: Decoded) -> bool:
             return decoded.result.ok and lexicographic_gain(ctx, decoded.result)[:2] >= lock
 
+        # nếu rollout đã chọn bài, chừa đủ giờ để chấm lại bài pha Q bằng một lần chơi tiếp
+        deadline_q = deadline if (deadline is None or not picked) else deadline - roll["worst"]
         res_q = improve(
             ctx_q,
             start=best_sol,
-            deadline=deadline,
+            deadline=deadline_q,
             max_iterations=iters2,
             seed=seed,
             on_better=better_q,
@@ -241,11 +368,25 @@ def plan_day(
             band=w.q_band * w.serving,
             accept=keeps_lock,
             rng_salt=1,
+            stop=stop,
         )
         if keeps_lock(res_q.decoded) and res_q.decoded.score > base_q:
-            best_sol, best_dec = res_q.solution, rescore(ctx, res_q.decoded)
+            polished = rescore(ctx, res_q.decoded)
+            keep = True
+            if picked and lookahead is not None and polished.plan != best_dec.plan:
+                # pha Q có thể dời trạng thái cuối ngày mà rollout vừa chọn: chấm lại bài pha Q
+                # (tổng của bài rollout đã có sẵn); hết giờ thì giữ bài rollout
+                if deadline is not None and time.monotonic() + roll["worst"] >= deadline:
+                    keep = False
+                else:
+                    g1 = lexicographic_gain(ctx, polished.result)
+                    total1 = tuple(a + b for a, b in zip(g1, lookahead(polished)))
+                    keep = roll["total"] is None or total1 >= roll["total"]
+            if keep:
+                best_sol, best_dec = res_q.solution, polished
 
     final = best_dec
+    final.picked_by = picked
     if on_plan is not None and final is not first:
         on_plan(final)
     return final

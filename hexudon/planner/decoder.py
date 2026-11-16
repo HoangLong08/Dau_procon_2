@@ -44,6 +44,9 @@ class Decoded:
     score: float
     truncated: int = 0
     dropped_meets: int = 0
+    #: "rollout" khi bài được chọn theo kết quả chơi tiếp các ngày sau thay vì theo điểm
+    #: (R4); strategist khi đó gửi nó ở lượt cuối dù score_day thấp hơn bài đã gửi
+    picked_by: str = ""
 
 
 def _emit_path(ctx: DayContext, start: int, path: Sequence[int], budget: int) -> Tuple[List[int], int, int]:

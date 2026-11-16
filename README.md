@@ -7,7 +7,7 @@ Python thuần, **không cài gì thêm** — chỉ thư viện chuẩn. Yêu c�
 
 ```bash
 git clone <repo> && cd procon-2026
-python -m unittest discover -s tests     # 285 test, phải xanh toàn bộ (Windows, macOS, Linux)
+python -m unittest discover -s tests     # 298 test, phải xanh toàn bộ (Windows, macOS, Linux)
 ```
 
 ---
@@ -270,6 +270,14 @@ chỉ nhận nghiệm kém nghiệm tốt nhất không quá 0,25 B. Từ 16/11/
 cuối ngày là **pha Q**: khoá (chuỗi mới, D) hôm nay, chỉ nhận nghiệm kém không quá 2
 phần, và chỉ gửi lại khi (L, D, Q) hôm nay tăng ngặt.
 
+**Rollout cuối ngày (R4, từ 16/11/2026).** Trước pha Q, bot giữ tới 8 nghiệm khác nhau
+về trạng thái cuối ngày (cả nghiệm kém một chuỗi hôm nay), chạy thêm hai lượt ALNS
+ngắn với trọng số "tiết kiệm xăng" và "cuối ngày × 2", rồi chơi tiếp 3 ngày bằng bộ
+dựng tham lam cho từng nghiệm. Nghiệm có (L, D, Q) của hôm nay cộng các ngày sau lớn
+nhất được chọn và gửi ở lượt cuối, kể cả khi điểm trong ngày của nó thấp hơn. Không bao
+giờ chọn nghiệm ít chuỗi mới hơn. Đo trên giải đấu giả lập: D +0,5, Q +0,9 mỗi trận ở
+300 vòng/ngày; Q +2,0 ở 2000 vòng. Ngày cuối, đạt cận trên của hôm nay thì dừng (R3).
+
 ### Cách chia thời gian trong một ngày
 
 Bot gửi **bài an toàn** trong khoảng 10 ms sau khi nhận trạng thái, rồi tiếp tục
@@ -429,7 +437,7 @@ Ba mức, từ nhanh tới giống ngày thi nhất. Mọi lệnh chạy ở th�
 ### 6.1. Test tự động (khoảng 2 phút, không cần mạng)
 
 ```bash
-python -m unittest discover -s tests      # phải ra: Ran 285 tests ... OK
+python -m unittest discover -s tests      # phải ra: Ran 298 tests ... OK
 ```
 
 ### 6.2. Tập dượt trên máy bằng server giả (không cần mạng, không cần token thật)

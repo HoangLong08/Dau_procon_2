@@ -9,7 +9,6 @@ Cách làm: chơi thử CẢ TRẬN cho từng phương án bằng bộ dựng n
 đầu bằng tìm kiếm ALNS thật.
 """
 
-import random
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
@@ -18,9 +17,7 @@ from .. import rules
 from ..model import AgentState, MatchConfig
 from ..pathing import DayGraph, DistTable
 from ..traffic import TrafficForecast
-from .construct import construct
-from .decoder import decode
-from .engine import make_context, plan_day
+from .lookahead import play_days
 from .solution import Weights
 
 
@@ -98,46 +95,10 @@ def rollout(
     """
     agents = [AgentState(kinds[i], config.agent_starts[i], config.fuel_limits)
               for i in range(config.n_agents)]
-    visited: set = set()
-    daily_types = 0
-    servings = 0
     status = {c: rules.SMOOTH for c in config.road_cells}
-    prev_status = None
-    prev_stay = None
-    rng = random.Random(seed)
-
-    days_done = 0
-    for day in range(config.n_days):
-        if deadline is not None and time.monotonic() >= deadline:
-            break
-        next_status = forecast.predict(status, prev_status, own_stay_yesterday=prev_stay,
-                                       floor_today=day == 1)
-        ctx = make_context(
-            config, day, agents, status, [s.stocks for s in config.spots], visited,
-            weights=weights, forecast_status=next_status,
-        )
-        if iterations_per_day > 0:
-            decoded = plan_day(ctx, deadline=deadline, seed=seed, max_iterations=iterations_per_day)
-        elif seconds_per_day > 0:
-            stop = time.monotonic() + seconds_per_day
-            if deadline is not None:
-                stop = min(stop, deadline)
-            decoded = plan_day(ctx, deadline=stop, seed=seed)
-        else:
-            decoded = decode(ctx, construct(ctx, rng))
-        result = decoded.result
-        visited |= result.brands
-        daily_types += len(result.brands)
-        servings += result.servings
-        agents = [AgentState(kinds[i], result.end_pos[i], result.end_fuel[i])
-                  for i in range(config.n_agents)]
-        # dự báo phải nhận HÔM NAY và HÔM QUA; truyền hôm nay hai lần thì
-        # công thức hai ngày của luật thành vô nghĩa đúng lúc nó cần nhất
-        status, prev_status = forecast.predict(
-            status, prev_status, own_stay_today=result.stay, own_stay_yesterday=prev_stay,
-            steps_today=config.steps_of_day(day), floor_today=day == 1), status
-        prev_stay = result.stay
-        days_done += 1
+    visited, daily_types, servings, days_done = play_days(
+        config, kinds, forecast, 0, agents, set(), status, None, None, weights=weights, seed=seed,
+        deadline=deadline, seconds_per_day=seconds_per_day, iterations_per_day=iterations_per_day)
     score = (len(visited), daily_types, servings)
     return (score, days_done) if with_days else score
 

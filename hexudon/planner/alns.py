@@ -6,7 +6,7 @@ kết quả tệ nhất cũng chỉ là điểm thấp hơn, không bao giờ l�
 
 import random
 import time
-from typing import Callable, Dict, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from .construct import construct, repair
 from .decoder import Decoded, decode
@@ -205,6 +205,69 @@ class Roulette:
             self.uses[name] = 0
 
 
+#: Elite nhận mọi nghiệm đã chấm kém nghiệm tốt nhất không quá ngần này × B
+ELITE_BAND = 2.0
+
+
+class Elite:
+    """Các nghiệm ALNS đã chấm, khác nhau về trạng thái cuối ngày (R4).
+
+    Chữ ký = ô cuối và xăng (làm tròn theo F/4) của từng xe tuần tra; mỗi chữ ký giữ
+    nghiệm điểm cao nhất. Giữ riêng hai mức (chuỗi mới, D) hôm nay cao nhất, mỗi mức
+    tối đa ceil(k/2) nghiệm: rollout cuối ngày cần cả phương án "kém một chuỗi hôm nay
+    nhưng kết thúc ngày ở chỗ tốt hơn", thứ ALNS một mình không bao giờ chọn.
+    """
+
+    def __init__(self, ctx: DayContext, k: int, band: float = ELITE_BAND):
+        self.k = max(0, int(k))
+        self.per_level = max(1, (self.k + 1) // 2)
+        self.band = band * ctx.weights.B
+        self.patrols = list(ctx.patrols)
+        self.visited = ctx.visited_brands
+        self.bucket = max(1, ctx.config.fuel_limits // 4)
+        self.items: Dict[tuple, Tuple[float, tuple, DaySolution, Decoded]] = {}
+
+    def signature(self, decoded: Decoded) -> tuple:
+        res = decoded.result
+        return (tuple(res.end_pos[i] for i in self.patrols),
+                tuple(res.end_fuel[i] // self.bucket for i in self.patrols))
+
+    def level(self, decoded: Decoded) -> tuple:
+        brands = decoded.result.brands
+        return (len(brands - self.visited), len(brands))
+
+    def offer(self, sol: DaySolution, decoded: Decoded, best_score: Optional[float] = None) -> None:
+        if self.k <= 0 or not decoded.result.ok:
+            return
+        if best_score is not None and decoded.score < best_score - self.band:
+            return
+        sig = self.signature(decoded)
+        old = self.items.get(sig)
+        if old is not None and decoded.score <= old[0]:
+            return
+        self.items[sig] = (decoded.score, self.level(decoded), sol.copy(), decoded)
+        if len(self.items) > 4 * self.k:
+            self._prune()
+
+    def _prune(self) -> None:
+        keep = {}
+        for sig, item in self._ranked():
+            keep[sig] = item
+        self.items = keep
+
+    def _ranked(self) -> List[Tuple[tuple, tuple]]:
+        levels = sorted({item[1] for item in self.items.values()}, reverse=True)[:2]
+        out = []
+        for lv in levels:
+            group = sorted(((sig, item) for sig, item in self.items.items() if item[1] == lv),
+                           key=lambda x: -x[1][0])
+            out.extend(group[:self.per_level])
+        return out
+
+    def entries(self) -> List[Tuple[DaySolution, Decoded]]:
+        return [(item[2], item[3]) for _, item in self._ranked()]
+
+
 class AlnsResult:
     __slots__ = ("solution", "decoded", "iterations", "seconds")
 
@@ -227,6 +290,8 @@ def improve(
     band: Optional[float] = None,
     accept: Optional[Callable[[Decoded], bool]] = None,
     rng_salt: int = 0,
+    elite: Optional[Elite] = None,
+    stop: Optional[Callable[[Decoded], bool]] = None,
 ) -> AlnsResult:
     """Chạy ALNS tới hạn chót. Luôn trả về một nghiệm hợp lệ.
 
@@ -237,6 +302,9 @@ def improve(
     `band` thay dải chấp nhận RRT mặc định (RRT_BAND × B). `accept`, nếu có, loại
     hẳn nghiệm không đạt (coi như điểm −∞): pha Q dùng nó để giữ (chuỗi mới, D).
     `rng_salt` đổi dòng ngẫu nhiên cho lần gọi thứ hai trong cùng một ngày.
+    `elite`, nếu có, nhận mọi nghiệm đã chấm trong dải ELITE_BAND (rollout cuối ngày, R4).
+    `stop`, nếu có, dừng ngay khi nghiệm tốt nhất thoả nó (cận trên ngày cuối, R3).
+    Ba tham số này không đụng tới rng nên không đổi đường tìm kiếm.
     """
     rng = random.Random(((seed << 8) ^ (ctx.day + 1)) + (rng_salt << 20))
     began = time.monotonic()
@@ -246,6 +314,10 @@ def improve(
     best, best_dec = cur.copy(), cur_dec
     if on_better is not None:
         on_better(best, best_dec)
+    if elite is not None:
+        elite.offer(cur, cur_dec)
+    if stop is not None and best_dec.result.ok and stop(best_dec):
+        return AlnsResult(best, best_dec, 0, time.monotonic() - began)
 
     destroy = Roulette(DESTROY_OPS)
     repair_ops = Roulette(REPAIR_OPS)
@@ -277,6 +349,8 @@ def improve(
         s = cand_dec.score
         if accept is not None and not accept(cand_dec):
             s = float("-inf")
+        elif elite is not None:
+            elite.offer(cand, cand_dec, best_dec.score)
 
         if s > best_dec.score:
             best, best_dec = cand.copy(), cand_dec
@@ -286,6 +360,8 @@ def improve(
             since_best = 0
             if on_better is not None:
                 on_better(best, best_dec)
+            if stop is not None and stop(best_dec):
+                break
         elif s > cur_dec.score:
             cur, cur_dec = cand, cand_dec
             destroy.award(d_name, REWARD_BETTER)

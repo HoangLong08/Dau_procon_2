@@ -76,6 +76,17 @@ class Weights:
     #: ưu tiên số phần; (chuỗi mới, D) vẫn bị khoá bằng accept, còn cover_penalty, strand,
     #: deadline được nhân bù để giữ nguyên độ lớn tuyệt đối. 0 = giữ B như pha 1
     q_B: float = 0.0
+    # --- rollout cuối ngày (R4). rollout_k=0 là hành vi trước đó ---
+    #: số nghiệm khác nhau về trạng thái cuối ngày được chơi tiếp tới hết trận để chọn
+    rollout_k: float = 8.0
+    #: phần ngân sách cho R4: một nửa chạy hai lượt ALNS biến thể (tiết kiệm xăng, cuối
+    #: ngày ×2) để có ứng viên khác hẳn, nửa còn lại chơi tiếp (theo vòng: nửa đầu là vòng
+    #: ALNS lấy từ pha 1, phần chơi tiếp không tốn vòng)
+    rollout_share: float = 0.2
+    #: số ngày chơi tiếp khi chấm một ứng viên; 0 = tới hết trận
+    rollout_days: float = 3.0
+    #: R3: 1 = ngày cuối, đạt cận trên (chuỗi mới, D, Q) của hôm nay thì dừng tìm và gửi ngay
+    ub_stop: float = 1.0
 
 
 @dataclass

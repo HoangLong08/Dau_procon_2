@@ -198,9 +198,14 @@ class MatchStrategist:
                 return
             gain = lexicographic_gain(ctx, decoded.result)
             last = sent["decoded"]
+            # bài cuối do rollout chọn (R4) có thể có score_day thấp hơn bài đã gửi: vẫn
+            # gửi, vì nó được chọn chính là để đổi phần thu hôm nay lấy các ngày sau
+            rollout_final = final and decoded.picked_by == "rollout" and (
+                last is None or decoded.plan != last.plan)
             if last is not None and not (
                     gain > sent["gain"]
-                    or decoded.score >= last.score + RESUBMIT_MIN_GAIN * ctx.weights.B):
+                    or decoded.score >= last.score + RESUBMIT_MIN_GAIN * ctx.weights.B
+                    or rollout_final):
                 return
             sent["count"] += 1
             if submit(decoded.plan):
@@ -217,11 +222,46 @@ class MatchStrategist:
 
         best = plan_day(ctx, deadline=deadline, seed=self.seed, on_plan=on_plan,
                         on_improve=lambda decoded: offer(decoded, final=False),
-                        max_iterations=max_iterations, **hooks)
+                        max_iterations=max_iterations,
+                        lookahead=self._lookahead(state, status, ctx.steps), **hooks)
+        if best.picked_by == "rollout":
+            g = lexicographic_gain(ctx, best.result)
+            self.log(f"ngày {state.day + 1}: chọn bài theo rollout các ngày sau "
+                     f"({g[1]} loại, {g[2]} phần hôm nay)")
         applied = best if submit is None or sent["decoded"] is None else sent["decoded"]
         if record:
             self.record(state, applied, status)
         return applied
+
+    def _lookahead(self, state: DayState, status: Dict[int, int], steps: int):
+        """Hàm chấm một bài hôm nay bằng (chuỗi mới, D, Q) của các ngày sau (R4), hoặc None.
+
+        Chơi tiếp bằng bộ dựng tham lam từ trạng thái cuối ngày của bài, với giao thông
+        theo dự báo của chính strategist (như record() dự báo cho ngày mai).
+        """
+        if self.weights.rollout_k < 1 or state.day + 1 >= self.config.n_days:
+            return None
+        from .lookahead import future_gain
+
+        config = self.config
+        kinds = list(self.kinds)
+        visited = set(self.visited_brands)
+        status_today = dict(status)
+        status_yesterday = self.status_yesterday
+        stay_yesterday = self.own_stay_yesterday
+        weights = self.weights
+        forecast = self.forecast
+        seed = self.seed
+        day = state.day
+
+        horizon = int(weights.rollout_days) or None
+
+        def look(decoded: Decoded):
+            return future_gain(config, kinds, forecast, day, decoded.result, visited, status_today,
+                               status_yesterday, stay_yesterday, weights=weights, seed=seed,
+                               max_days=horizon)
+
+        return look
 
     def _watch(self, state: DayState, agents: List[AgentState], status: Dict[int, int],
                steps: int, started: float):
