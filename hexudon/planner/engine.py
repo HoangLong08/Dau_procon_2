@@ -14,7 +14,7 @@ from .solution import DayContext, DaySolution, Weights, build_context
 
 #: hạng mục cuối ngày "mềm", bị nhân Weights.q_end_scale trong pha Q (R2); các hạng
 #: mục giữ L và D tương lai (cover_penalty, strand, deadline) giữ nguyên
-SOFT_END_TERMS = ("urgency", "end_on_spot", "near_chain", "fuel_bonus", "road_park")
+SOFT_END_TERMS = ("urgency", "end_on_spot", "near_chain", "fuel_bonus", "road_park", "value_weight")
 
 
 def make_context(

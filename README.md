@@ -7,7 +7,7 @@ Python thuần, **không cài gì thêm** — chỉ thư viện chuẩn. Yêu c�
 
 ```bash
 git clone <repo> && cd procon-2026
-python -m unittest discover -s tests     # 321 test, phải xanh toàn bộ (Windows, macOS, Linux)
+python -m unittest discover -s tests     # 333 test, phải xanh toàn bộ (Windows, macOS, Linux)
 ```
 
 ---
@@ -293,6 +293,16 @@ nhất được chọn và gửi ở lượt cuối, kể cả khi điểm trong
 giờ chọn nghiệm ít chuỗi mới hơn. Đo trên giải đấu giả lập: D +0,5, Q +0,9 mỗi trận ở
 300 vòng/ngày; Q +2,0 ở 2000 vòng. Ngày cuối, đạt cận trên của hôm nay thì dừng (R3).
 
+**Hàm giá trị học được (B4, từ 17/11/2026).** Giá trị cuối ngày đặt tay được cộng thêm
+một mô hình tuyến tính học từ tự chơi (`planner/value.py`, `planner/value_model.json`).
+Mô hình nhận 30 đặc trưng của trạng thái cuối ngày (khoảng cách tới chuỗi chưa thu,
+xăng, xe tiếp, độ phủ spot...) và dự đoán phần thu các ngày sau so với các nghiệm khác
+của cùng ngày. Dữ liệu là 9.420 nghiệm ứng viên của R4 trên 400 bản đồ ngẫu nhiên, mỗi
+nghiệm được chơi tiếp bằng ALNS tới hết trận; không dùng bản đồ của giải đấu. Đo trên 120
+cặp ở sảnh 10 đội: D +0,62, Q +2,5 mỗi trận, không mất L, thời gian lập kế hoạch tăng
+khoảng 6%. `value_weight = 0` là như cũ. Học lại bằng
+`thi_nghiem_ai/du_lieu_v.py` rồi `hoc_v.py --xuat`.
+
 ### Cách chia thời gian trong một ngày
 
 Bot gửi **bài an toàn** trong khoảng 10 ms sau khi nhận trạng thái, rồi tiếp tục
@@ -452,7 +462,7 @@ Ba mức, từ nhanh tới giống ngày thi nhất. Mọi lệnh chạy ở th�
 ### 6.1. Test tự động (khoảng 2 phút, không cần mạng)
 
 ```bash
-python -m unittest discover -s tests      # phải ra: Ran 321 tests ... OK
+python -m unittest discover -s tests      # phải ra: Ran 333 tests ... OK
 ```
 
 ### 6.2. Tập dượt trên máy bằng server giả (không cần mạng, không cần token thật)

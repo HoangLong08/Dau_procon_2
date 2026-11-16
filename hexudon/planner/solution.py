@@ -95,6 +95,12 @@ class Weights:
     #: R5: chọn vai trò chấm theo 0 = dự báo cũ, 1 = cộng dự báo cũ với giao thông nhiều đội
     #: (traffic.PRIOR), 2 = chỉ giao thông nhiều đội; > 0 còn chặn 0 xe tiếp khi thiếu xăng
     role_traffic: float = 1.0
+    # --- hàm giá trị học được (B4, 17/11/2026). 0 là hành vi trước đó ---
+    #: > 0: ghép value_weight × B × V(trạng thái cuối ngày) vào end_value theo mô hình đi kèm
+    #: (planner/value.py, value_model.json: tuyến tính, cộng vào end_value đặt tay). Giải
+    #: đấu 120 cặp ở sảnh 10 đội: D +0,62 ± 0,38, Q +2,51 ± 0,80, không mất L (báo cáo 4.8);
+    #: 0,5 trung tính, 2,0 ít Q hơn
+    value_weight: float = 1.0
 
 
 @dataclass

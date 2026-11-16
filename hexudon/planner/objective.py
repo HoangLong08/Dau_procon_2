@@ -5,6 +5,7 @@ from typing import Dict, List, Sequence
 from .. import rules
 from ..simulator import DayResult
 from .solution import DayContext
+from .value import default_model, features, learned_end_value
 
 INF = float("inf")
 #: R1: chuỗi chưa thu mà xe gần nhất cuối ngày đã xa hơn tỉ lệ này của số bước còn lại
@@ -23,9 +24,26 @@ def _dist_to_brand(ctx: DayContext, cell: int, brand: int) -> float:
 
 
 def end_value(ctx: DayContext, result: DayResult) -> float:
-    """Giá trị cuối ngày V (mục 9 của spec). Ngày cuối trả 0."""
+    """Giá trị cuối ngày V (mục 9 của spec). Ngày cuối trả 0.
+
+    B4: value_weight > 0 và có mô hình (planner/value.py) thì ghép hàm giá trị học
+    được, theo `mode` của mô hình: cộng vào end_value cũ, hoặc thay hạng mục mềm.
+    """
     if ctx.days_left <= 0:
         return 0.0
+    w = ctx.weights
+    if w.value_weight > 0:
+        model = default_model()
+        if model is not None:
+            if model.residual:
+                return (_hand_end_value(ctx, result)
+                        + w.value_weight * w.B * model.predict(features(ctx, result)))
+            return learned_end_value(ctx, result, w, model)
+    return _hand_end_value(ctx, result)
+
+
+def _hand_end_value(ctx: DayContext, result: DayResult) -> float:
+    """end_value đặt tay (trước B4)."""
     w = ctx.weights
     B = w.B
     cfg = ctx.config

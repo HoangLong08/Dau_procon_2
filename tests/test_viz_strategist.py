@@ -88,7 +88,11 @@ class StrategistEventsTest(unittest.TestCase):
         self.assertTrue(all(p["day"] == 0 for p in self.rec.of("alns_progress")))
         scores = [safe["score"]] + [b["score"] for b in self.rec.of("alns_better")]
         self.assertEqual(scores, sorted(scores))
-        self.assertAlmostEqual(max(scores), round(best.score, 3), places=3)
+        if best.picked_by == "rollout":
+            # R4 có thể chọn nghiệm điểm trong ngày thấp hơn vì các ngày sau tốt hơn
+            self.assertGreaterEqual(max(scores), round(best.score, 3))
+        else:
+            self.assertAlmostEqual(max(scores), round(best.score, 3), places=3)
         [forecast] = self.rec.of("forecast")
         self.assertEqual(forecast["day"], 1)
 
