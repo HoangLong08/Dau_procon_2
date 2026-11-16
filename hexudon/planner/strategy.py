@@ -1,5 +1,8 @@
 """Bộ nhớ trận: giữ trạng thái xuyên ngày và điều phối planner trong ngân sách."""
 
+import dataclasses
+import os
+import threading
 import time
 from typing import Callable, Dict, List, Optional, Sequence, Set
 
@@ -10,6 +13,7 @@ from ..traffic import ForecastCalibrator, TrafficForecast, counts_from_positions
 from .decoder import Decoded
 from .engine import make_context, plan_day
 from .objective import lexicographic_gain
+from .parallel import DayJob, SeedPool, run_job, total_of
 from .roles import select_roles
 from .solution import Weights
 
@@ -22,6 +26,17 @@ MAX_SUBMITS_PER_DAY = 3
 #: thời gian phản hồi tính theo bài hợp lệ cuối cùng, nên gửi lại vì một chênh
 #: lệch nhỏ hơn chỉ làm chậm thêm (cases 11.2, 11.8)
 RESUBMIT_MIN_GAIN = 0.25
+#: R7: số seed mặc định khi để "auto": vừa đủ dùng lõi mà vẫn chạy được vài câu cùng lúc
+AUTO_SEARCH_JOBS_MAX = 4
+#: R7: tiến trình con phải trả lời ping trong ngần này giây, không thì bỏ Pool cả trận
+POOL_PING_SECONDS = 20.0
+
+
+def resolve_search_jobs(value: Optional[int]) -> int:
+    """None ("auto") = min(4, số lõi // 2), ít nhất 1."""
+    if value is None:
+        return max(1, min(AUTO_SEARCH_JOBS_MAX, (os.cpu_count() or 2) // 2))
+    return max(1, int(value))
 
 
 class MatchStrategist:
@@ -39,6 +54,7 @@ class MatchStrategist:
         emit: Optional[Callable[[str, dict], None]] = None,
         search_iterations: Optional[int] = None,
         role_iterations: Optional[int] = None,
+        search_jobs: Optional[int] = 1,
     ):
         self.config = config
         self.weights = weights or Weights()
@@ -53,6 +69,16 @@ class MatchStrategist:
         self.log = log or (lambda msg: None)
         #: web trực quan hoá; None thì không phát gì và không tốn thêm thời gian
         self.emit = emit
+        #: R7: số seed ALNS mỗi ngày (1 = như cũ). Theo giây: các seed phụ chạy trên Pool
+        #: tiến trình giữ suốt trận; theo vòng: chạy tuần tự để kết quả tất định
+        self.search_jobs = resolve_search_jobs(search_jobs)
+        self._pool: Optional[SeedPool] = None
+        self._pool_failed = False
+        self._pool_thread: Optional[threading.Thread] = None
+        self._pool_ready = threading.Event()
+        self._closed = False
+        #: giây ước lượng cho một lần chơi tiếp chấm bài cuối; đo lại mỗi khi phải chơi tiếp
+        self._roll_seconds: Optional[float] = None
 
         self.kinds: List[int] = [rules.PATROL] * config.n_agents
         self.visited_brands: Set[int] = set()
@@ -123,9 +149,64 @@ class MatchStrategist:
         ))
         n_cars = sum(1 for k in kinds if k == rules.REFUEL)
         self.log(f"chọn vai trò: {n_cars} xe tiếp nhiên liệu / {len(kinds)} agent -> {kinds}")
+        self._ensure_pool()             # mở Pool trước ngày 0 để giấu thời gian khởi động
         if emit is not None:
             emit("roles_chosen", {"kinds": list(kinds)})
         return kinds
+
+    def _ensure_pool(self) -> Optional[SeedPool]:
+        """Pool cho các seed phụ (R7), sẵn sàng thì trả về, không thì None (không bao giờ chờ).
+
+        Lần gọi đầu mở Pool trong luồng nền; Pool chỉ được dùng sau khi mọi tiến trình con
+        trả lời ping. Chưa sẵn sàng thì ngày đó tìm một seed như cũ.
+        """
+        if (self.search_jobs <= 1 or self.search_iterations is not None or self._pool_failed
+                or self._closed):
+            return None
+        if self._pool_thread is None:
+            self._pool_thread = threading.Thread(target=self._open_pool, name="hexudon-pool", daemon=True)
+            self._pool_thread.start()
+        if not self._pool_ready.is_set():
+            return None
+        pool = self._pool
+        if pool is None or not pool.ok:
+            self._pool_failed = True
+            return None
+        return pool
+
+    def _open_pool(self) -> None:
+        pool = None
+        try:
+            pool = SeedPool(self.search_jobs - 1)
+            if not pool.ping(POOL_PING_SECONDS):
+                raise RuntimeError(f"tiến trình con không trả lời trong {POOL_PING_SECONDS:.0f}s")
+        except Exception as exc:
+            self._pool_failed = True
+            if pool is not None:
+                pool.close()
+            self.log(f"không mở được tiến trình con ({exc!r}): tìm kiếm một seed")
+            return
+        if self._closed:
+            pool.close()
+            return
+        self._pool = pool
+        self._pool_ready.set()
+        self.log(f"tìm kiếm song song: {self.search_jobs} seed mỗi ngày")
+
+    def wait_pool(self, timeout: float) -> bool:
+        """Chờ Pool sẵn sàng (test, công cụ); False nếu không cần, hỏng hoặc quá hạn."""
+        self._ensure_pool()
+        if self._pool_thread is None:
+            return False
+        self._pool_thread.join(timeout)
+        return self._pool_ready.is_set() and not self._pool_failed
+
+    def close(self) -> None:
+        """Đóng Pool của R7 (gọi khi trận kết thúc). Luồng mở Pool còn chạy thì nó tự đóng."""
+        self._closed = True
+        if self._pool is not None:
+            self._pool.close()
+            self._pool = None
 
     def _reset_forecast(self, forecast: TrafficForecast) -> None:
         """Đặt dự báo của trận; R6 bật thì kèm calibrator mới, mô hình ban đầu là PRIOR."""
@@ -231,6 +312,35 @@ class MatchStrategist:
         sent = {"count": 0, "decoded": None, "gain": None}
         self.last_sent = None
         on_safe, hooks = self._watch(state, agents, status, ctx.steps, started)
+        look = self._lookahead(state, status, ctx.steps)
+
+        # R7: giao các seed phụ trước khi tự tìm, để chúng chạy cùng lúc
+        extra_seeds = [self.seed + 7919 * k for k in range(1, self.search_jobs)]
+        base_job = None
+        handles = None
+        main_deadline = deadline
+        if extra_seeds:
+            base_job = DayJob(
+                day=state.day, kinds=list(self.kinds), agents=agents, status=status,
+                visited=set(self.visited_brands), weights=self.weights, forecast_status=forecast_status,
+                steps_override=steps_override, seed=self.seed, max_iterations=max_iterations,
+                forecast=self.forecast if look is not None else None,
+                status_yesterday=self.status_yesterday, stay_yesterday=self.own_stay_yesterday,
+                horizon=int(self.weights.rollout_days) or None, rollout_seed=self.seed)
+            pool = self._ensure_pool() if deadline is not None else None
+            if pool is not None:
+                span = max(0.0, deadline - time.monotonic())
+                # chừa giờ cho một lần chơi tiếp chấm bài cuối (khi plan_day chưa chấm sẵn)
+                reserve = min(0.3 * span, max(0.25, 1.25 * self._roll_estimate(base_job.horizon) + 0.1))
+                wall = time.time() + span
+                handles = pool.start(cfg, [dataclasses.replace(base_job, seed=sd, wall_deadline=wall)
+                                           for sd in extra_seeds], reserve)
+                if handles is not None:
+                    main_deadline = deadline - reserve
+        # theo vòng mà server vẫn có hạn thật: không chạy tuần tự các seed phụ (sẽ vượt hạn)
+        parallel = base_job is not None and (
+            handles is not None or (self.search_iterations is not None and deadline is None))
+        final_calls = {"n": 0}
 
         def offer(decoded: Decoded, final: bool) -> None:
             """Gửi nếu đáng: tối đa MAX_SUBMITS_PER_DAY lần, luôn chừa một lần cho bài cuối."""
@@ -243,7 +353,7 @@ class MatchStrategist:
             last = sent["decoded"]
             # bài cuối do rollout chọn (R4) có thể có score_day thấp hơn bài đã gửi: vẫn
             # gửi, vì nó được chọn chính là để đổi phần thu hôm nay lấy các ngày sau
-            rollout_final = final and decoded.picked_by == "rollout" and (
+            rollout_final = final and decoded.picked_by in ("rollout", "song_song") and (
                 last is None or decoded.plan != last.plan)
             if last is not None and not (
                     gain > sent["gain"]
@@ -261,12 +371,18 @@ class MatchStrategist:
             if on_safe is not None:
                 on_safe(decoded)
                 on_safe = None
+            final_calls["n"] += 1
+            # R7: bài cuối của seed chính chờ so với các seed phụ rồi mới gửi
+            if parallel and final_calls["n"] > 1:
+                return
             offer(decoded, final=True)
 
-        best = plan_day(ctx, deadline=deadline, seed=self.seed, on_plan=on_plan,
+        best = plan_day(ctx, deadline=main_deadline, seed=self.seed, on_plan=on_plan,
                         on_improve=lambda decoded: offer(decoded, final=False),
-                        max_iterations=max_iterations,
-                        lookahead=self._lookahead(state, status, ctx.steps), **hooks)
+                        max_iterations=max_iterations, lookahead=look, **hooks)
+        if parallel:
+            best = self._pick_seed(ctx, best, look, base_job, extra_seeds, handles, deadline, max_iterations)
+            offer(best, final=True)
         if best.picked_by == "rollout":
             g = lexicographic_gain(ctx, best.result)
             self.log(f"ngày {state.day + 1}: chọn bài theo rollout các ngày sau "
@@ -275,6 +391,58 @@ class MatchStrategist:
         if record:
             self.record(state, applied, status)
         return applied
+
+    def _pick_seed(self, ctx, best: Decoded, look, base_job: DayJob, extra_seeds: List[int],
+                   handles, deadline: Optional[float], max_iterations: int) -> Decoded:
+        """R7: chọn giữa bài của seed chính và các seed phụ theo (chuỗi mới, D, Q) của hôm nay
+        cộng phần chơi tiếp các ngày sau; hoà thì theo điểm. Không nhận bài ít chuỗi mới hơn
+        hôm nay (L cứng, như R4). Bài của seed phụ thắng thì mang picked_by = "song_song"."""
+        if handles is not None:
+            until = deadline if deadline is not None else time.monotonic()
+            results = SeedPool.collect(handles, until)
+        else:                       # theo vòng: tuần tự, tất định
+            results = [run_job(self.config, dataclasses.replace(base_job, seed=sd, max_iterations=max_iterations))
+                       for sd in extra_seeds]
+        base_new = lexicographic_gain(ctx, best.result)[0]
+        if best.total is None and look is not None and handles is not None and deadline is not None \
+                and time.monotonic() + self._roll_estimate(base_job.horizon) > deadline:
+            self.log(f"ngày {ctx.day + 1}: không kịp chấm bài của seed chính, giữ bài đó")
+            return best
+        t0 = time.monotonic()
+        own_total = total_of(ctx, best, look)
+        if best.total is None and look is not None:
+            self._note_roll(time.monotonic() - t0)
+        cands = [(own_total, best.score, 0, best)]
+        for k, res in enumerate(results, 1):
+            if res is None:
+                continue
+            dec, total = res
+            if not dec.result.ok or lexicographic_gain(ctx, dec.result)[0] < base_new:
+                continue
+            cands.append((tuple(total), dec.score, -k, dec))
+        done = len(cands) - 1
+        _, _, neg_k, pick = max(cands, key=lambda c: (c[0], c[1], c[2]))
+        if neg_k != 0:
+            pick.picked_by = "song_song"
+            g = lexicographic_gain(ctx, pick.result)
+            self.log(f"ngày {ctx.day + 1}: chọn bài của seed song song {-neg_k} "
+                     f"({g[1]} loại, {g[2]} phần hôm nay; {done}/{len(extra_seeds)} seed phụ kịp)")
+        elif handles is not None and done < len(extra_seeds):
+            self.log(f"ngày {ctx.day + 1}: {done}/{len(extra_seeds)} seed phụ kịp hạn")
+        return pick
+
+    def _roll_estimate(self, horizon: Optional[int]) -> float:
+        """Giây cho một lần chơi tiếp: đo được thì dùng số đo, chưa thì ước theo cỡ bản đồ
+        (đo 17/11: 16×16 khoảng 0,04 s/ngày chơi tiếp, 32×32 khoảng 0,4 s/ngày)."""
+        if self._roll_seconds is not None:
+            return self._roll_seconds
+        days = horizon or max(1, self.config.n_days - 1)
+        cells = self.config.width * self.config.height
+        return 0.04 * days * (cells / 256.0) ** 1.6
+
+    def _note_roll(self, seconds: float) -> None:
+        old = self._roll_seconds
+        self._roll_seconds = seconds if old is None else max(seconds, 0.5 * (old + seconds))
 
     def _lookahead(self, state: DayState, status: Dict[int, int], steps: int):
         """Hàm chấm một bài hôm nay bằng (chuỗi mới, D, Q) của các ngày sau (R4), hoặc None.

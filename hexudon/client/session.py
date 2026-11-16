@@ -53,8 +53,11 @@ class MatchSession:
         log: Optional[Callable[[str], None]] = None,
         replay: Optional[ReplayWriter] = None,
         emit: Optional[Callable[[str, dict], None]] = None,
+        search_jobs: Optional[int] = 1,
     ):
         self.transport = transport
+        #: R7: số seed ALNS mỗi ngày; None = auto (strategy.resolve_search_jobs)
+        self.search_jobs = search_jobs
         self.search_seconds = search_seconds
         self.net_margin = net_margin
         self.role_seconds = role_seconds
@@ -92,8 +95,14 @@ class MatchSession:
         self.strategist = MatchStrategist(
             self.config, weights=self.weights, search_seconds=self.search_seconds,
             net_margin=self.net_margin, role_seconds=self.role_seconds,
-            seed=self.seed, log=self.log, emit=self.emit,
+            seed=self.seed, log=self.log, emit=self.emit, search_jobs=self.search_jobs,
         )
+        try:
+            return self._play(self.strategist)
+        finally:
+            self.strategist.close()
+
+    def _play(self, strategist) -> Optional[dict]:
         kinds = self.choose_roles()
         if self.emit is not None:
             # vai trò thật sự dùng: có thể khác vai trò đã chọn khi server không nhận

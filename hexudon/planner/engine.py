@@ -316,6 +316,8 @@ def plan_day(
     # nay cộng các ngày sau khi chơi tiếp bằng bộ dựng tham lam
     picked = ""
     roll = {"worst": 0.0, "total": None}
+    #: (bài, tổng hôm nay + các ngày sau) của bài đã được chơi tiếp chấm (R4)
+    known = None
     if use_roll and best_dec.result.ok and not reached:
         extra = []
         base_new = lexicographic_gain(ctx, best_dec.result)[0]
@@ -332,6 +334,8 @@ def plan_day(
         deadline_r = None if span is None else now + (1.0 - share) * span
         best_sol, best_dec, picked, roll = pick_by_lookahead(ctx, best_sol, best_dec, elite, lookahead,
                                                              deadline_r, extra=extra)
+        if roll["total"] is not None:
+            known = (best_dec.plan, roll["total"])
 
     iters2 = max_iterations - iters1 - 2 * iters_var
     time_left = deadline is None or time.monotonic() < deadline
@@ -382,11 +386,15 @@ def plan_day(
                     g1 = lexicographic_gain(ctx, polished.result)
                     total1 = tuple(a + b for a, b in zip(g1, lookahead(polished)))
                     keep = roll["total"] is None or total1 >= roll["total"]
+                    if keep:
+                        known = (polished.plan, total1)
             if keep:
                 best_sol, best_dec = res_q.solution, polished
 
     final = best_dec
     final.picked_by = picked
+    if known is not None and known[0] == final.plan:
+        final.total = known[1]
     if on_plan is not None and final is not first:
         on_plan(final)
     return final

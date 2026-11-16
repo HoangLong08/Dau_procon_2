@@ -47,6 +47,9 @@ class Decoded:
     #: "rollout" khi bài được chọn theo kết quả chơi tiếp các ngày sau thay vì theo điểm
     #: (R4); strategist khi đó gửi nó ở lượt cuối dù score_day thấp hơn bài đã gửi
     picked_by: str = ""
+    #: (chuỗi mới, D, Q) của hôm nay cộng phần chơi tiếp các ngày sau, nếu plan_day đã
+    #: tính cho đúng bài này (R4); R7 dùng lại để khỏi chơi tiếp thêm một lần
+    total: Optional[Tuple[int, int, int]] = None
 
 
 def _emit_path(ctx: DayContext, start: int, path: Sequence[int], budget: int) -> Tuple[List[int], int, int]:

@@ -38,7 +38,8 @@ class SearchBot(Bot):
     def __init__(self, config: MatchConfig, search_seconds: float = 1.0,
                  role_seconds: float = 5.0, seed: int = 0, weights: Optional[Weights] = None,
                  kinds: Optional[Sequence[int]] = None, emit=None,
-                 search_iterations: Optional[int] = None, role_iterations: Optional[int] = None):
+                 search_iterations: Optional[int] = None, role_iterations: Optional[int] = None,
+                 search_jobs: Optional[int] = 1):
         self.config = config
         self.seed = seed
         self.fixed_kinds = list(kinds) if kinds is not None else None
@@ -51,7 +52,11 @@ class SearchBot(Bot):
             config, weights=weights, search_seconds=search_seconds,
             net_margin=0.0, role_seconds=role_seconds, seed=seed, emit=emit,
             search_iterations=search_iterations, role_iterations=role_iterations,
+            search_jobs=search_jobs,
         )
+
+    def close(self) -> None:
+        self.strategist.close()
 
     def select_roles(self) -> List[int]:
         if self.fixed_kinds is not None:

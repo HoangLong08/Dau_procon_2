@@ -109,7 +109,8 @@ def play_one(args, tok: TeamToken, log: Log) -> int:
                                  token_reload=tok.reload, token_var=tok.var, log=log, replay=replay)
         session = MatchSession(transport, search_seconds=args.search_seconds,
                                net_margin=args.net_margin, role_seconds=args.role_seconds,
-                               seed=args.seed, log=log, replay=replay, emit=emit)
+                               seed=args.seed, log=log, replay=replay, emit=emit,
+                               search_jobs=getattr(args, "search_jobs", 1))
         try:
             session.run()
         except KeyboardInterrupt:
@@ -150,6 +151,10 @@ def _auto(value: Optional[float]) -> str:
     return "auto" if value is None else repr(float(value))
 
 
+def _jobs(value: Optional[int]) -> str:
+    return "auto" if value is None else str(int(value))
+
+
 def child_command(args, ref: GameRef, token_var: str, summary_path: str, label: str) -> List[str]:
     """Dòng lệnh cho một tiến trình con chơi đúng một câu với đúng một token."""
     cmd = [sys.executable, "-m", "hexudon", "web", "--game", ref.game_id, "--label", label,
@@ -157,7 +162,8 @@ def child_command(args, ref: GameRef, token_var: str, summary_path: str, label: 
            "--timeout", repr(float(args.timeout)), "--net-margin", repr(float(args.net_margin)),
            "--poll-seconds", repr(float(args.poll_seconds)),
            "--give-up-seconds", repr(float(args.give_up_seconds)), "--seed", str(args.seed),
-           "--search-seconds", _auto(args.search_seconds), "--role-seconds", _auto(args.role_seconds)]
+           "--search-seconds", _auto(args.search_seconds), "--role-seconds", _auto(args.role_seconds),
+           "--search-jobs", _jobs(getattr(args, "search_jobs", 1))]
     if ref.mode == PRACTICE:
         cmd.append("--practice")
     if getattr(args, "keep", False):

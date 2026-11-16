@@ -26,6 +26,16 @@ def _seconds_or_auto(text: str) -> Optional[float]:
     return None if text.strip().lower() == "auto" else float(text)
 
 
+def _jobs_or_auto(text: str) -> Optional[int]:
+    """'auto' = để strategy.resolve_search_jobs chọn theo số lõi; còn lại là số nguyên >= 1."""
+    if text.strip().lower() == "auto":
+        return None
+    value = int(text)
+    if value < 1:
+        raise argparse.ArgumentTypeError("--search-jobs phải >= 1")
+    return value
+
+
 def _load_config(path: str) -> MatchConfig:
     with open(path, encoding="utf-8") as fh:
         obj = json.load(fh)
@@ -54,6 +64,7 @@ def cmd_play(args) -> int:
     session = MatchSession(
         transport, search_seconds=args.search_seconds, net_margin=args.net_margin,
         role_seconds=args.role_seconds, seed=args.seed, log=_log, replay=replay,
+        search_jobs=args.search_jobs,
     )
     try:
         result = session.run()
@@ -73,6 +84,7 @@ def cmd_sandbox(args) -> int:
     session = MatchSession(
         transport, search_seconds=args.search_seconds, net_margin=args.net_margin,
         role_seconds=args.role_seconds, seed=args.seed, log=_log, replay=replay,
+        search_jobs=args.search_jobs,
     )
     try:
         session.run()
@@ -98,13 +110,19 @@ def cmd_sim(args) -> int:
         cls = BOT_TYPES[name.strip()]
         if name.strip() == "search":
             bots.append(cls(config, search_seconds=args.search_seconds,
-                            role_seconds=args.role_seconds, seed=args.seed + i))
+                            role_seconds=args.role_seconds, seed=args.seed + i,
+                            search_jobs=args.search_jobs))
         else:
             bots.append(cls(config, seed=args.seed + i))
     # lưu lượng chia cho số đội trong trận (cases 3, 8.8); --players lớn hơn số bot
     # giả lập thêm các đội có tên nhưng đứng yên cả trận
     config.players = max(args.players, len(bots)) if args.players else len(bots)
-    outcome = run_match(config, bots, log=_log)
+    try:
+        outcome = run_match(config, bots, log=_log)
+    finally:
+        for bot in bots:
+            if hasattr(bot, "close"):
+                bot.close()
     print("\nxếp hạng:")
     for rank, rec in enumerate(outcome.ranking(), 1):
         L, D, Q = rec.score()
@@ -453,6 +471,11 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--timeout", type=float, default=5.0,
                        help="hạn cứng mỗi cuộc gọi HTTP, tính cả lúc server trả nhỏ giọt")
 
+    def search_jobs_flag(p):
+        p.add_argument("--search-jobs", type=_jobs_or_auto, default=None,
+                       help="số seed ALNS mỗi ngày, mỗi seed một tiến trình (R7); "
+                            "mặc định auto = min(4, số lõi / 2); 1 = một tiến trình như cũ")
+
     def web_timing(p):
         p.add_argument("--search-seconds", type=_seconds_or_auto, default=None,
                        help="ngân sách tìm kiếm mỗi ngày; mặc định auto = theo hạn và độ dài ngày của server")
@@ -464,6 +487,7 @@ def build_parser() -> argparse.ArgumentParser:
                        help="mất liên lạc quá lâu thì thoát thay vì quay vô hạn")
         p.add_argument("--seed", type=int, default=0)
         p.add_argument("--out-dir", default="replays", help="thư mục ghi replay và tổng kết")
+        search_jobs_flag(p)
 
     p = sub.add_parser("play", help="thi đấu qua HTTP")
     p.add_argument("--url", required=True, help="ví dụ http://10.0.0.5:8099")
@@ -477,11 +501,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--give-up-seconds", type=float, default=120.0,
                    help="mất liên lạc quá lâu thì thoát thay vì quay vô hạn")
     common(p)
+    search_jobs_flag(p)
     p.set_defaults(func=cmd_play)
 
     p = sub.add_parser("sandbox", help="thi đấu qua stdin/stdout (JSON Lines)")
     p.add_argument("--replay", default=None)
     common(p)
+    search_jobs_flag(p)
     p.set_defaults(func=cmd_sandbox)
 
     p = sub.add_parser("sim", help="chạy một trận offline")
@@ -491,6 +517,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--days", type=int, default=0)
     p.add_argument("--bots", default="search,greedy,sample")
     common(p)
+    search_jobs_flag(p)
     p.set_defaults(func=cmd_sim)
 
     p = sub.add_parser("arena", help="trận offline n bot, ghi sự kiện cho web trực quan hoá")
