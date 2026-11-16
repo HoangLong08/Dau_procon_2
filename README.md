@@ -7,7 +7,7 @@ Python thuần, **không cài gì thêm** — chỉ thư viện chuẩn. Yêu c�
 
 ```bash
 git clone <repo> && cd procon-2026
-python -m unittest discover -s tests     # 333 test, phải xanh toàn bộ (Windows, macOS, Linux)
+python -m unittest discover -s tests     # 343 test, phải xanh toàn bộ (Windows, macOS, Linux)
 ```
 
 ---
@@ -146,6 +146,7 @@ Lệnh `web` và `web-bench` (server thi hexudon.hairbui76.id.vn) — **để ng
 |---|---|---|
 | `--search-seconds` | `auto` | ngân sách tìm kiếm mỗi ngày: hạn của ngày (contest) hoặc độ dài ngày BTC cấu hình (practice), trừ lề mạng |
 | `--role-seconds` | `auto` | ngân sách chọn vai trò: theo cửa sổ chọn xe server báo, đã chừa giờ để gửi vai trò tới nơi |
+| `--search-jobs` | `auto` | số seed ALNS mỗi ngày, mỗi seed một tiến trình (R7); `auto` = min(4, số lõi / 2); `1` = một tiến trình như cũ |
 | `--net-margin` | `2.0` | lề chừa cho mạng, trừ khỏi hạn của server |
 | `--timeout` | `5.0` | hạn cứng **mỗi cuộc gọi HTTP**; riêng `/result` và `/replay` sau trận được chờ 30 s mỗi lần, thử tối đa 3 lần |
 | `--poll-seconds` | `0.5` | nhịp hỏi `/state` |
@@ -161,6 +162,7 @@ Lệnh `play` và `sandbox` (server kiểu PTIT):
 | `--search-seconds` | `3.0` | ngân sách tìm kiếm mỗi ngày |
 | `--net-margin` | `1.5` | lề chừa cho mạng, trừ khỏi hạn của server |
 | `--role-seconds` | `3.0` | ngân sách chọn vai trò trước ngày 0 |
+| `--search-jobs` | `auto` | số seed ALNS mỗi ngày (R7), như lệnh `web` |
 | `--timeout` | `2.0` | hạn cứng **mỗi cuộc gọi HTTP** |
 | `--poll-seconds` | `0.25` | nhịp hỏi `/state` (dưới 0,2 s có thể bị HTTP 429) |
 | `--give-up-seconds` | `120` | mất liên lạc quá lâu thì thoát thay vì quay vô hạn |
@@ -272,8 +274,9 @@ Có sẵn **dự báo tự hiệu chỉnh** (R6, `traffic_calib = 1`). Mỗi sá
 định lưu lượng của các đội khác với đường thật rồi chọn giả định đúng nhất. Giả định
 gồm: "như ta" theo nhiều tỉ lệ, theo độ phổ biến, "mai như hôm nay", và công thức cũ.
 Bot cũng tính vết xe đỗ của đối thủ. Ở sảnh 10 đội, dự báo này đúng 72,9% số ô so với
-63,8% của công thức cũ. Tuy vậy nó không thêm điểm (D −0,33 ± 0,25 trên 120 cặp), nên
-**tắt mặc định**.
+63,8% của công thức cũ. Trước khi có hàm giá trị học được (B4), nó không thêm điểm (D
+−0,33). Khi đã có B4 thì có lợi: D +0,56 ± 0,27, Q +0,9 trên 120 cặp. Vì vậy **bật mặc
+định** từ 17/11/2026.
 
 **5. Tìm kiếm ALNS trên nghiệm "lộ trình spot + điểm hẹn".** Bộ giải mã là **toàn
 phần**: mọi nghiệm, kể cả nghiệm vô lý, đều ra kế hoạch mà simulator chấp nhận theo
@@ -301,7 +304,21 @@ của cùng ngày. Dữ liệu là 9.420 nghiệm ứng viên của R4 trên 400
 nghiệm được chơi tiếp bằng ALNS tới hết trận; không dùng bản đồ của giải đấu. Đo trên 120
 cặp ở sảnh 10 đội: D +0,62, Q +2,5 mỗi trận, không mất L, thời gian lập kế hoạch tăng
 khoảng 6%. `value_weight = 0` là như cũ. Học lại bằng
-`thi_nghiem_ai/du_lieu_v.py` rồi `hoc_v.py --xuat`.
+`thi_nghiem_ai/du_lieu_v.py` rồi `hoc_v.py --xuat`. Biến môi trường `HEXUDON_VALUE_MODEL`
+chọn một file mô hình khác mà không ghi đè file mặc định. Vòng tự chơi thứ hai (V2, học
+từ bot đã có V1) tốt hơn khi đo offline nhưng thiệt trong giải đấu (D −0,54), nên vẫn
+dùng V1.
+
+**Nhiều seed song song (R7, từ 17/11/2026).**
+- Mỗi ngày, ngoài seed của tiến trình chính, bot chạy thêm 3 seed ALNS trên các tiến
+  trình con (`--search-jobs`, mặc định `auto` = 4 trên máy 8 lõi trở lên). Mỗi seed chạy
+  trọn ngày, kể cả rollout R4 và pha Q.
+- Hết giờ, bài có (L, D, Q) của hôm nay cộng các ngày sau (chơi tiếp tham lam) lớn nhất
+  được gửi ở lượt cuối.
+- Pool tiến trình mở một lần lúc chọn vai trò. Bot chỉ dùng Pool sau khi mọi tiến trình
+  con trả lời; nếu không, bot chạy một seed như cũ chứ không bao giờ chờ.
+- Đo trên 120 cặp ở sảnh 10 đội: D +1,08 ± 0,26, Q +2,3 ± 0,6 mỗi trận, không mất L.
+- Giải đấu và `bench` (theo số vòng) chạy các seed tuần tự để kết quả tất định.
 
 ### Cách chia thời gian trong một ngày
 
@@ -462,7 +479,7 @@ Ba mức, từ nhanh tới giống ngày thi nhất. Mọi lệnh chạy ở th�
 ### 6.1. Test tự động (khoảng 2 phút, không cần mạng)
 
 ```bash
-python -m unittest discover -s tests      # phải ra: Ran 333 tests ... OK
+python -m unittest discover -s tests      # phải ra: Ran 343 tests ... OK
 ```
 
 ### 6.2. Tập dượt trên máy bằng server giả (không cần mạng, không cần token thật)

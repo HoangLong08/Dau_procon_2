@@ -27,6 +27,8 @@ from .solution import DayContext, Weights
 INF = float("inf")
 #: mô hình đi kèm package; không có file thì value_weight > 0 rơi về end_value cũ
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "value_model.json")
+#: biến môi trường chọn file mô hình khác (thử mô hình mới mà không ghi đè file mặc định)
+ENV_MODEL = "HEXUDON_VALUE_MODEL"
 #: như objective.DEADLINE_MARGIN (không import để tránh vòng import)
 DEADLINE_MARGIN = 0.5
 #: trọng số cố định của đặc trưng "end_value mềm cũ": không đổi theo núm của trận, để
@@ -244,17 +246,19 @@ class ValueModel:
         return total
 
 
-_DEFAULT: Dict[str, Optional[ValueModel]] = {}
+_CACHE: Dict[str, Optional[ValueModel]] = {}
 
 
 def default_model() -> Optional[ValueModel]:
-    """Mô hình đi kèm package (nạp một lần); None nếu chưa có file."""
-    if "m" not in _DEFAULT:
+    """Mô hình đang dùng: file trong HEXUDON_VALUE_MODEL nếu có, không thì file đi kèm
+    package. Nạp một lần mỗi đường dẫn; None nếu không đọc được."""
+    path = os.environ.get(ENV_MODEL) or MODEL_PATH
+    if path not in _CACHE:
         try:
-            _DEFAULT["m"] = ValueModel.load(MODEL_PATH)
+            _CACHE[path] = ValueModel.load(path)
         except (OSError, ValueError, KeyError):
-            _DEFAULT["m"] = None
-    return _DEFAULT["m"]
+            _CACHE[path] = None
+    return _CACHE[path]
 
 
 def learned_end_value(ctx: DayContext, result, w: Weights, model: ValueModel) -> float:

@@ -172,9 +172,10 @@ class StrategistTest(unittest.TestCase):
                 for i in range(2)]
 
     def test_calibrator_is_fed_every_morning(self):
+        self.assertEqual(Weights().traffic_calib, 1.0, "R6 bật mặc định từ 17/11/2026 (cùng B4)")
         config = generate(seed=7, size=8, agents=4, days=3)
         config.players = 2
-        bots = self._bots(config, Weights(traffic_calib=1.0))
+        bots = self._bots(config, Weights())
         run_match(config, bots)
         for bot in bots:
             cal = bot.strategist.calibrator
@@ -182,12 +183,10 @@ class StrategistTest(unittest.TestCase):
             self.assertEqual(cal.observed, config.n_days - 1)
             self.assertIs(bot.strategist.forecast.model, cal.best())
 
-    def test_default_keeps_the_old_forecast(self):
-        # R6 tắt mặc định (17/11/2026): đo được dự báo đúng hơn nhưng D −0,33 mỗi trận
-        self.assertEqual(Weights().traffic_calib, 0.0)
+    def test_traffic_calib_zero_keeps_the_old_forecast(self):
         config = generate(seed=7, size=8, agents=4, days=2)
         config.players = 2
-        bots = self._bots(config, Weights())
+        bots = self._bots(config, Weights(traffic_calib=0.0))
         run_match(config, bots)
         for bot in bots:
             self.assertIsNone(bot.strategist.calibrator)

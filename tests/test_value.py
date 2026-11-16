@@ -72,6 +72,22 @@ class ModelTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             ValueModel(data)
 
+    def test_environment_variable_selects_another_model_file(self):
+        import json
+        import os
+        import tempfile
+        coef = [0.0] * len(FEATURE_NAMES)
+        coef[0] = 1.0
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "v2.json")
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump({"features": FEATURE_NAMES, "kind": "tuyen_tinh", "mode": "phan_du", "coef": coef}, fh)
+            with mock.patch.dict(os.environ, {value.ENV_MODEL: path}):
+                m = value.default_model()
+                self.assertEqual(m.coef[0], 1.0)
+                self.assertIs(value.default_model(), m, "nạp một lần mỗi đường dẫn")
+        self.assertIsNot(value.default_model(), m, "bỏ biến môi trường thì về mô hình đi kèm")
+
     def test_shipped_model_loads(self):
         m = value.default_model()
         self.assertIsNotNone(m, "value_model.json phải đi kèm package")
