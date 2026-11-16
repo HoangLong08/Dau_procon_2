@@ -210,3 +210,7 @@ BOT_TYPES = {
     "sample": SampleBot,
     "wait": WaitBot,
 }
+
+
+# các kiểu đối thủ giả lập tự đăng ký vào BOT_TYPES (import ở cuối để tránh vòng lặp)
+from . import opponents as _opponents  # noqa: E402,F401

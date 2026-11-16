@@ -15,6 +15,7 @@ import urllib.request
 from hexudon.cli import EXIT_SIGNALS, _install_exit_signals
 from hexudon.client.web_games import CONTEST, PRACTICE, GameRef
 from hexudon.offline.mapgen import generate
+from hexudon.offline.opponents import OPPONENT_TYPES
 from hexudon.offline.web_server import WebWorld, serve_web
 from hexudon.viz.events import read_events
 from hexudon.viz.guard import GuardError
@@ -96,7 +97,8 @@ class VizServerTest(unittest.TestCase):
         code, data = self.call("/api/options")
         self.assertEqual(code, 200)
         self.assertIn("sample_16", data["maps"])
-        self.assertEqual(set(data["bot_types"]), {"search", "greedy", "sample", "wait"})
+        # bot đối thủ giả lập (offline/opponents.py) cũng chọn được trong arena
+        self.assertEqual(set(data["bot_types"]), {"search", "greedy", "sample", "wait"} | set(OPPONENT_TYPES))
         self.assertEqual(data["tokens"]["fake"], ["TEST_DAU_01", "TEST_DAU_02"])
         self.assertTrue(data["fake"]["reachable"])
 
