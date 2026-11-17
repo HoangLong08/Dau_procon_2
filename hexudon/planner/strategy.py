@@ -11,7 +11,7 @@ from ..model import AgentState, DayState, MatchConfig
 from ..simulator import run_day, wait_plan
 from ..traffic import ForecastCalibrator, TrafficForecast, counts_from_positions, parked_stay
 from .decoder import Decoded
-from .engine import make_context, plan_day
+from .engine import day_upper_bound, make_context, plan_day
 from .objective import lexicographic_gain
 from .parallel import DayJob, SeedPool, run_job, total_of
 from .roles import select_roles
@@ -396,7 +396,13 @@ class MatchStrategist:
                    handles, deadline: Optional[float], max_iterations: int) -> Decoded:
         """R7: chọn giữa bài của seed chính và các seed phụ theo (chuỗi mới, D, Q) của hôm nay
         cộng phần chơi tiếp các ngày sau; hoà thì theo điểm. Không nhận bài ít chuỗi mới hơn
-        hôm nay (L cứng, như R4). Bài của seed phụ thắng thì mang picked_by = "song_song"."""
+        hôm nay (L cứng, như R4). Bài của seed phụ thắng thì mang picked_by = "song_song".
+
+        Ngày cuối không có phần chơi tiếp: bài đã đạt cận trên của hôm nay không thể bị vượt,
+        nên trả ngay thay vì chờ seed phụ tới hạn. Nhờ vậy dừng sớm của R3 vẫn rút được thời
+        gian phản hồi (tiêu chí 4), quyết định ở ca kho = 1."""
+        if ctx.days_left == 0 and best.result.ok and                 lexicographic_gain(ctx, best.result) == day_upper_bound(ctx):
+            return best
         if handles is not None:
             until = deadline if deadline is not None else time.monotonic()
             results = SeedPool.collect(handles, until)

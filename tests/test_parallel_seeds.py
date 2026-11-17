@@ -131,6 +131,42 @@ class TimeModeTest(unittest.TestCase):
         self.assertLess(time.monotonic() - t0, 2.0, "close không chờ luồng mở Pool")
 
 
+    def test_last_day_at_the_upper_bound_is_sent_without_waiting_for_side_seeds(self):
+        # R3 + R7: ngày cuối đạt cận trên thì trả ngay; chờ seed phụ chỉ làm chậm tiêu chí 4
+        from hexudon import rules
+        from hexudon.model import MatchConfig, Spot
+        from hexudon.planner.engine import safe_solution
+        from hexudon.planner.parallel import DayJob
+        w = 8
+        cfg = MatchConfig(width=w, height=w, cells=[rules.PLAIN] * (w * w), spots=[Spot(0, 9, 1)],
+                          agent_starts=[10, 40], fuel_limits=20, day_steps=[12], day_seconds=[5],
+                          players=1, busy_threshold=1, jammed_threshold=2)
+        kinds = [rules.PATROL, rules.REFUEL]
+        s = strategist(cfg, kinds, search_seconds=None, search_jobs=2)
+        state = day0(cfg, kinds)
+        ctx = make_context(cfg, 0, state.agents, {}, [1], set(), weights=s.weights)
+        _, best = safe_solution(ctx, 0)
+
+        class SlowSeed:
+            """Seed phụ chỉ trả lời khi hết hạn chờ."""
+            def get(self, timeout):
+                time.sleep(timeout)
+                raise TimeoutError
+
+        job = DayJob(day=0, kinds=kinds, agents=state.agents, status={}, visited=set(), weights=s.weights,
+                     forecast_status=None, steps_override=None, seed=1)
+        t0 = time.monotonic()
+        pick = s._pick_seed(ctx, best, None, job, [7], [SlowSeed()], t0 + 2.0, 10)
+        self.assertIs(pick, best)
+        self.assertLess(time.monotonic() - t0, 0.3, "đã đạt cận trên mà vẫn chờ seed phụ")
+        # chưa đạt cận trên thì vẫn chờ seed phụ như thường
+        with mock.patch.object(strategy, "day_upper_bound", return_value=(9, 9, 9)):
+            t0 = time.monotonic()
+            pick = s._pick_seed(ctx, best, None, job, [7], [SlowSeed()], t0 + 0.6, 10)
+            self.assertGreaterEqual(time.monotonic() - t0, 0.5)
+        self.assertIs(pick, best)
+
+
 class FlagTest(unittest.TestCase):
     def test_search_jobs_flag(self):
         parser = build_parser()
