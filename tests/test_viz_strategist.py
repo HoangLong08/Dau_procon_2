@@ -86,13 +86,24 @@ class StrategistEventsTest(unittest.TestCase):
         self.assertEqual(len(safe["trace"]["pos"]), self.config.steps_of_day(0) + 1)
         self.assertIn("ms", safe)
         self.assertTrue(all(p["day"] == 0 for p in self.rec.of("alns_progress")))
-        scores = [safe["score"]] + [b["score"] for b in self.rec.of("alns_better")]
-        self.assertEqual(scores, sorted(scores))
+        events = [safe] + self.rec.of("alns_better")
+        scores = [e["score"] for e in events]
+        # pha 1 báo khi điểm vượt mọi bài trước; pha Q (khoá chuỗi mới, D) báo khi (L, D, Q) hôm nay
+        # vượt bài liền trước, dù điểm theo trọng số của ngày có thể thấp hơn (q_B nhỏ, 18/11/2026)
+        for i in range(1, len(events)):
+            better_score = events[i]["score"] > max(scores[:i])
+            better_gain = (events[i]["types"], events[i]["servings"]) > (events[i - 1]["types"],
+                                                                         events[i - 1]["servings"])
+            self.assertTrue(better_score or better_gain, f"sự kiện {i} không tốt hơn gì: {events[i]['score']}")
         if best.picked_by == "rollout":
             # R4 có thể chọn nghiệm điểm trong ngày thấp hơn vì các ngày sau tốt hơn
             self.assertGreaterEqual(max(scores), round(best.score, 3))
         else:
-            self.assertAlmostEqual(max(scores), round(best.score, 3), places=3)
+            # bài cuối là một bài đã báo; pha Q với q_B nhỏ có thể đổi giá trị cuối ngày lấy thêm
+            # phần, nên bài cuối không kém bài điểm cao nhất về (chuỗi, phần) dù điểm có thể thấp hơn
+            self.assertIn(round(best.score, 3), scores)
+            top = max(events, key=lambda e: e["score"])
+            self.assertGreaterEqual((len(best.result.brands), best.result.servings), (top["types"], top["servings"]))
         [forecast] = self.rec.of("forecast")
         self.assertEqual(forecast["day"], 1)
 

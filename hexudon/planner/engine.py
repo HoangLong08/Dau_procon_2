@@ -9,6 +9,7 @@ from ..pathing import DayGraph, DistTable, LegBook
 from .alns import Elite, _remove_stops, improve
 from .construct import InsertionState, construct
 from .decoder import Decoded, decode
+from .local import local_search
 from .objective import lexicographic_gain, score_day
 from .solution import DayContext, DaySolution, Weights, build_context
 
@@ -139,6 +140,78 @@ def ensure_new_chains(ctx: DayContext, sol: DaySolution, decoded: Decoded) -> Tu
     return best_sol, best_dec
 
 
+def ensure_today_chains(ctx: DayContext, sol: DaySolution, decoded: Decoded,
+                        deadline: Optional[float] = None) -> Tuple[DaySolution, Decoded]:
+    """Vá D hôm nay: chuỗi chưa thu hôm nay mà một xe tuần tra tới được thì thử chèn.
+
+    Như ensure_new_chains nhưng cho mọi chuỗi thiếu HÔM NAY (đã thu trong trận cũng tính),
+    và để lấy chỗ được bỏ MỘT điểm trùng chuỗi (chuỗi của nó vẫn còn điểm dừng khác) ở bất
+    kỳ vị trí nào của tour, hoặc cắt đuôi tour. Chỉ nhận biến thể làm (chuỗi mới, D) của hôm
+    nay tăng thật; trong các biến thể đó chọn điểm cao nhất. Hết giờ thì trả nghiệm tốt nhất
+    đã có.
+    """
+    if ctx.weights.today_chain_first <= 0 or not decoded.result.ok:
+        return sol, decoded
+    cfg = ctx.config
+    best_sol, best_dec = sol, decoded
+    missing = [b for b in cfg.brands if b not in decoded.result.brands]
+    for brand in missing:
+        if deadline is not None and time.monotonic() >= deadline:
+            break
+        if brand in best_dec.result.brands:
+            continue
+        base = lexicographic_gain(ctx, best_dec.result)[:2]
+        found: Optional[Tuple[DaySolution, Decoded]] = None
+        counts: Dict[int, int] = {}
+        for tour in best_sol.tours:
+            for sp in tour:
+                b = ctx.spot_brand[sp]
+                counts[b] = counts.get(b, 0) + 1
+        for spot in cfg.spots_by_brand.get(brand, ()):
+            cell = ctx.spot_cells[spot]
+            for slot in range(ctx.n_patrols):
+                if ctx.dist_step.cost(ctx.start_of_patrol(slot), cell) > ctx.steps:
+                    continue
+                tour = best_sol.tours[slot]
+                if spot in tour:
+                    continue
+                # cách lấy chỗ: không bỏ gì; bỏ một điểm trùng chuỗi; cắt đuôi dần
+                removals = [()]
+                removals += [(i,) for i, sp in enumerate(tour) if counts.get(ctx.spot_brand[sp], 0) >= 2]
+                removals += [tuple(range(keep, len(tour))) for keep in range(len(tour) - 1, -1, -1)]
+                seen = set()
+                for gone in removals:
+                    if gone in seen:
+                        continue
+                    seen.add(gone)
+                    if deadline is not None and time.monotonic() >= deadline:
+                        break
+                    trial = best_sol.copy()
+                    if gone:
+                        trial = _remove_stops(trial, [(slot, i) for i in gone])
+                    state = InsertionState(ctx, trial)
+                    options = []
+                    for pos in range(len(trial.tours[slot]) + 1):
+                        d = state.delta(slot, pos, spot)
+                        if d is not None and state.feasible(slot, d[0], d[1]):
+                            options.append((d[0], pos, d[1]))
+                    if not options:
+                        continue
+                    dsteps, pos, dfuel = min(options)
+                    state.apply(slot, pos, spot, dsteps, dfuel)
+                    dec = decode(ctx, state.sol)
+                    if not dec.result.ok or lexicographic_gain(ctx, dec.result)[:2] <= base:
+                        continue
+                    if found is None or dec.score > found[1].score:
+                        found = (state.sol, dec)
+                    if not gone or len(gone) == 1:
+                        continue
+                    break  # cắt đuôi ít nhất có thể cho tour này
+        if found is not None and found[1].score > best_dec.score:
+            best_sol, best_dec = found
+    return best_sol, best_dec
+
+
 def day_upper_bound(ctx: DayContext) -> Tuple[int, int, int]:
     """Cận trên (chuỗi mới, D, Q) của hôm nay (R3).
 
@@ -263,14 +336,24 @@ def plan_day(
                 on_improve(decoded)
 
     w = ctx.weights
+    #: điểm xuất phát của ALNS: bài an toàn, hoặc bài an toàn đã vá D hôm nay
+    start_sol, start_dec = sol, first
+    if w.today_chain_first > 0:
+        # vá D hôm nay SAU khi đã gửi bài an toàn (không làm chậm lần gửi đầu)
+        patched_sol, patched = ensure_today_chains(ctx, sol, first, deadline=deadline)
+        if patched is not first:
+            start_sol, start_dec = patched_sol, patched
+            better(start_sol, start_dec)
     # R3: ngày cuối end_value = 0, nên đạt cận trên của hôm nay là xong: dừng ngay để bài
     # cuối được gửi sớm (thời gian phản hồi là tiêu chí 4). Ngày khác vẫn tìm tiếp, vì
     # trạng thái cuối ngày còn cải thiện được và D, Q các ngày sau xếp trên thời gian.
     stop = None
     if ctx.days_left == 0 and w.ub_stop > 0:
         ub = day_upper_bound(ctx)
-        if first.result.ok and lexicographic_gain(ctx, first.result) == ub:
-            return first
+        if start_dec.result.ok and lexicographic_gain(ctx, start_dec.result) == ub:
+            if on_plan is not None and start_dec is not first:
+                on_plan(start_dec)
+            return start_dec
 
         def stop(decoded: Decoded) -> bool:
             return decoded.result.ok and lexicographic_gain(ctx, decoded.result) == ub
@@ -293,7 +376,7 @@ def plan_day(
     elite = Elite(ctx, int(w.rollout_k)) if use_roll else None
     result = improve(
         ctx,
-        start=sol,
+        start=start_sol,
         deadline=deadline1,
         max_iterations=iters1,
         seed=seed,
@@ -302,11 +385,12 @@ def plan_day(
         elite=elite,
         stop=stop,
     )
-    if result.decoded.score > first.score:
+    if result.decoded.score > start_dec.score:
         best_sol, best_dec = result.solution, result.decoded
     else:
-        best_sol, best_dec = sol, first
+        best_sol, best_dec = start_sol, start_dec
     patched_sol, patched = ensure_new_chains(ctx, best_sol, best_dec)
+    patched_sol, patched = ensure_today_chains(ctx, patched_sol, patched, deadline=deadline)
     if patched is not best_dec:
         best_sol, best_dec = patched_sol, patched
         better(best_sol, best_dec)
@@ -338,6 +422,10 @@ def plan_day(
             known = (best_dec.plan, roll["total"])
 
     iters2 = max_iterations - iters1 - 2 * iters_var
+    # Bước 2: tìm kiếm cục bộ lấy ls_share của ngân sách từ pha Q (cùng khoá chuỗi mới, D)
+    ls = min(max(0.0, w.ls_share), share) if share > 0 else 0.0
+    iters_ls = int(round(iters2 * ls / share)) if ls > 0 else 0
+    iters_q = iters2 - iters_ls
     time_left = deadline is None or time.monotonic() < deadline
     if share > 0 and iters2 > 0 and time_left and best_dec.result.ok and not reached:
         lock = lexicographic_gain(ctx, best_dec.result)[:2]
@@ -361,11 +449,14 @@ def plan_day(
 
         # nếu rollout đã chọn bài, chừa đủ giờ để chấm lại bài pha Q bằng một lần chơi tiếp
         deadline_q = deadline if (deadline is None or not picked) else deadline - roll["worst"]
+        deadline_alns = deadline_q
+        if ls > 0 and deadline_q is not None:
+            deadline_alns = deadline_q - (ls / share) * max(0.0, deadline_q - time.monotonic())
         res_q = improve(
             ctx_q,
             start=best_sol,
-            deadline=deadline_q,
-            max_iterations=iters2,
+            deadline=deadline_alns,
+            max_iterations=max(1, iters_q),
             seed=seed,
             on_better=better_q,
             on_progress=on_progress,
@@ -374,6 +465,19 @@ def plan_day(
             rng_salt=1,
             stop=stop,
         )
+        if ls > 0 and (deadline_q is None or time.monotonic() < deadline_q):
+            # Bước 2: ủ mô phỏng trên nước đi nhỏ, từ nghiệm tốt nhất của pha Q
+            if keeps_lock(res_q.decoded) and res_q.decoded.score > base_q:
+                ls_start, ls_dec = res_q.solution, res_q.decoded
+            else:
+                ls_start = best_sol
+                ls_dec = rescore(ctx_q, best_dec) if best_dec.result.ok else best_dec
+            res_ls = local_search(
+                ctx_q, ls_start, start_dec=ls_dec, deadline=deadline_q,
+                max_moves=max(1, int(round(iters_ls * max(0.0, w.ls_moves_per_iter)))),
+                seed=seed, accept=keeps_lock, on_better=better_q, stop=stop)
+            if res_ls.decoded.score > res_q.decoded.score or not keeps_lock(res_q.decoded):
+                res_q = res_ls
         if keeps_lock(res_q.decoded) and res_q.decoded.score > base_q:
             polished = rescore(ctx, res_q.decoded)
             keep = True

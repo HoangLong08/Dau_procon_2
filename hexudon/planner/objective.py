@@ -5,7 +5,7 @@ from typing import Dict, List, Sequence
 from .. import rules
 from ..simulator import DayResult
 from .solution import DayContext
-from .value import default_model, features, learned_end_value
+from .value import default_model, features, learned_parts
 
 INF = float("inf")
 #: R1: chuỗi chưa thu mà xe gần nhất cuối ngày đã xa hơn tỉ lệ này của số bước còn lại
@@ -32,22 +32,43 @@ def end_value(ctx: DayContext, result: DayResult) -> float:
     if ctx.days_left <= 0:
         return 0.0
     w = ctx.weights
+    hard, soft = None, None
     if w.value_weight > 0:
         model = default_model()
         if model is not None:
             if model.residual:
-                return (_hand_end_value(ctx, result)
-                        + w.value_weight * w.B * model.predict(features(ctx, result)))
-            return learned_end_value(ctx, result, w, model)
-    return _hand_end_value(ctx, result)
+                hard, soft = _hand_parts(ctx, result)
+                soft += w.value_weight * w.soft * model.predict(features(ctx, result))
+            else:
+                hard, soft = learned_parts(ctx, result, w, model)
+    if hard is None:
+        hard, soft = _hand_parts(ctx, result)
+    if w.soft_cap > 0:
+        # D hôm nay (B mỗi chuỗi) luôn thắng: hai nghiệm chênh nhau về phần mềm tối đa 2·cap·B
+        cap = w.soft_cap * w.B
+        soft = max(-cap, min(cap, soft))
+    return hard + soft
 
 
 def _hand_end_value(ctx: DayContext, result: DayResult) -> float:
     """end_value đặt tay (trước B4)."""
+    hard, soft = _hand_parts(ctx, result)
+    return hard + soft
+
+
+def _hand_parts(ctx: DayContext, result: DayResult):
+    """end_value đặt tay tách hai phần: (cứng, mềm).
+
+    Cứng giữ L và D tương lai, luôn theo B: chuỗi không kịp ghé, độ gấp, hạn chót, xe kẹt
+    xăng. Mềm: kết thúc trên spot, chuỗi gần, xăng còn lại, tự gây tắc; theo Weights.soft.
+    """
     w = ctx.weights
     B = w.B
+    #: đơn vị của hạng mục mềm (Weights.soft_unit); hạng mục giữ L, D tương lai vẫn theo B
+    U = w.soft
     cfg = ctx.config
     value = 0.0
+    soft = 0.0
 
     end_pos = result.end_pos
     end_fuel = result.end_fuel
@@ -71,7 +92,7 @@ def _hand_end_value(ctx: DayContext, result: DayResult) -> float:
     spot_at = cfg.spot_index_at
     for c in patrol_cells:
         if c in spot_at:
-            value += w.end_on_spot * B + w.serving
+            soft += w.end_on_spot * U + w.serving
 
     # V_near: chuỗi có thể với tới trong nửa ngày mai
     if ctx.next_steps > 0:
@@ -81,7 +102,7 @@ def _hand_end_value(ctx: DayContext, result: DayResult) -> float:
             best = min((_dist_to_brand(ctx, c, brand) for c in patrol_cells), default=INF)
             if best <= reach:
                 near += 1
-        value += w.near_chain * B * near
+        soft += w.near_chain * U * near
 
     # V_fuel: xe kẹt xăng nhiều ngày; thích kết thúc đầy bình. Xăng tính theo ô
     # ĐANG ĐỨNG: còn 1 xăng trên núi hoặc đường là kẹt, trên đồng bằng thì chưa (cases 7.11)
@@ -93,12 +114,12 @@ def _hand_end_value(ctx: DayContext, result: DayResult) -> float:
             car_dist = min((table.cost(cell, cc) for cc in car_cells), default=INF)
             if car_dist == INF or car_dist > 0.5 * max(1, ctx.next_steps):
                 value -= w.strand * B * ctx.days_left
-        value += w.fuel_bonus * B * (fuel / max(1, cfg.fuel_limits)) / max(1, ctx.n_patrols)
+        soft += w.fuel_bonus * U * (fuel / max(1, cfg.fuel_limits)) / max(1, ctx.n_patrols)
 
     # V_road: tự gây tắc cho chính mình
     own_road_stay = sum(v for cell, v in result.stay.items() if cfg.cells[cell] == rules.ROAD)
-    value -= w.road_park * B * own_road_stay / max(1, cfg.players)
-    return value
+    soft -= w.road_park * U * own_road_stay / max(1, cfg.players)
+    return value, soft
 
 
 def score_day(ctx: DayContext, result: DayResult, truncated: int = 0, dropped_meets: int = 0) -> float:

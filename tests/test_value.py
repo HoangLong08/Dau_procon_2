@@ -100,7 +100,7 @@ class ObjectiveTest(unittest.TestCase):
         self.assertEqual(Weights().value_weight, 1.0, "B4 bật mặc định từ 17/11/2026")
         ctx, dec = sample_states(days=(1,))[0]
         c = dataclasses.replace(ctx, weights=Weights(value_weight=0.0))
-        with mock.patch.object(objective, "learned_end_value") as spy,                 mock.patch.object(objective, "features") as feats:
+        with mock.patch.object(objective, "learned_parts") as spy,                 mock.patch.object(objective, "features") as feats:
             end_value(c, dec.result)
         spy.assert_not_called()
         feats.assert_not_called()
@@ -112,7 +112,12 @@ class ObjectiveTest(unittest.TestCase):
         c = dataclasses.replace(ctx, weights=w)
         with mock.patch.object(objective, "default_model", return_value=m):
             got = end_value(c, dec.result)
-        self.assertAlmostEqual(got, hard_terms(ctx, dec.result, w) + 0.5 * w.B * 2.0)
+        # phần mềm theo đơn vị Weights.soft (B khi soft_unit = 0, soft_unit từ 18/11/2026)
+        self.assertAlmostEqual(got, hard_terms(ctx, dec.result, w) + 0.5 * w.soft * 2.0)
+        w0 = Weights(value_weight=0.5, soft_unit=0.0)
+        with mock.patch.object(objective, "default_model", return_value=m):
+            got0 = end_value(dataclasses.replace(ctx, weights=w0), dec.result)
+        self.assertAlmostEqual(got0, hard_terms(ctx, dec.result, w0) + 0.5 * w0.B * 2.0)
 
     def test_linear_residual_model_adds_to_the_hand_tuned_value(self):
         ctx, dec = sample_states(days=(1,))[0]
@@ -126,7 +131,7 @@ class ObjectiveTest(unittest.TestCase):
         hand = end_value(dataclasses.replace(ctx, weights=Weights(value_weight=0.0)), dec.result)
         with mock.patch.object(objective, "default_model", return_value=m):
             got = end_value(c, dec.result)
-        self.assertAlmostEqual(got, hand + 0.5 * ctx.weights.B * 0.25 * x[0])
+        self.assertAlmostEqual(got, hand + 0.5 * Weights().soft * 0.25 * x[0])
 
     def test_missing_model_falls_back_to_the_old_end_value(self):
         ctx, dec = sample_states(days=(1,))[0]

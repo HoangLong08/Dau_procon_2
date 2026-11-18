@@ -320,6 +320,31 @@ dùng V1.
 - Đo trên 120 cặp ở sảnh 10 đội: D +1,08 ± 0,26, Q +2,3 ± 0,6 mỗi trận, không mất L.
 - Giải đấu và `bench` (theo số vòng) chạy các seed tuần tự để kết quả tất định.
 
+**Sửa sau khi thua DAU 2 cả 4 trận contest (từ 18/11/2026).** Trên server VN, L và D
+chạm trần mọi ngày, nên số phần Q quyết định. Ta thua DAU 2 37–135 phần mỗi trận. Báo cáo
+`de-xuat-chien-thuat/phan-tich-va-de-xuat-chien-thuat.md`, mục 4.11.
+- **Hạng mục cuối ngày mềm tính bằng đơn vị phần** (`soft_unit = 20`, `soft_auto = 1`).
+  - Các hạng mục này là: kết thúc trên spot, chuỗi gần, xăng còn lại, tự gây tắc, và V. Trước đây chúng tính theo B = 1000, nên bot đổi hàng chục phần lấy bình xăng đầy.
+  - Nay mỗi đơn vị bằng 20 phần, nhưng chỉ khi D đã an toàn: đủ L và hôm qua đạt trần D. Ngày khác vẫn theo B.
+  - Luật giữ L và D tương lai (chuỗi không kịp ghé, hạn chót, xe kẹt xăng) vẫn theo B.
+- **Vá D hôm nay** (`today_chain_first = 1`): chuỗi thiếu hôm nay mà một xe tới được thì
+  được chèn vào, có thể bỏ điểm trùng chuỗi hoặc cắt đuôi tour để lấy chỗ. Trước đây ngày
+  69 bước ta hụt 1 chuỗi; nay từ đúng trạng thái của DAU 2 thì 0/40 ngày thiếu D.
+- **Pha Q chiếm 50% ngân sách, với B = 0,05** (`q_share = 0.5`, `q_B = 0.05`).
+- **Chọn vai trò:**
+  - thử mọi vị trí cho 1 xe tiếp;
+  - D của lần chơi thử trong khoảng 2% coi như hoà rồi so Q;
+  - vòng 2 có 4 phương án (`role_*`).
+  - Khi theo giây, vòng 1 chạy song song trên Pool và vòng 2 vừa đúng một lượt tiến trình.
+- **Kết quả đo:**
+  - Cả trận trên 4 bản đồ contest, bot tự chọn vai trò: Q +132, D +2,7 so với bản 17/11.
+  - Sảnh 10 đội kiểu Nhật: D trung tính, không mất L.
+  - Bản đồ VN: Q +20.
+- Mọi núm đặt về 0 (`role_seeds = 1`, `q_share = 0.3`) thì tái hiện đúng hành vi trước 18/11.
+  Biến thể `cu_17_11` trong `thi_nghiem_ai/doi_chieu_dau2.py` ghim bản đó.
+- Có code nhưng để tắt, vì đo không thấy lợi: tìm kiếm cục bộ ủ mô phỏng
+  (`planner/local.py`, `ls_share`) và kẹp phần mềm (`soft_cap`).
+
 ### Cách chia thời gian trong một ngày
 
 Bot gửi **bài an toàn** trong khoảng 10 ms sau khi nhận trạng thái, rồi tiếp tục

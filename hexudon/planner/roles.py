@@ -9,6 +9,7 @@ Cách làm: chơi thử CẢ TRẬN cho từng phương án bằng bộ dựng n
 đầu bằng tìm kiếm ALNS thật.
 """
 
+import itertools
 import os
 import time
 from dataclasses import dataclass, field
@@ -52,19 +53,32 @@ def centrality(config: MatchConfig) -> List[float]:
     return out
 
 
-def candidates(config: MatchConfig) -> List[RoleCandidate]:
-    """Liệt kê phương án vai trò: 0..3 xe tiếp, chọn theo độ trung tâm."""
+def candidates(config: MatchConfig, weights: Optional[Weights] = None) -> List[RoleCandidate]:
+    """Liệt kê phương án vai trò: 0..3 xe tiếp, chọn theo độ trung tâm.
+
+    Mặc định mỗi số xe tiếp chỉ có xe trung tâm nhất cộng 1 phương án thay thế. Với
+    weights.role_all_positions > 0: 1 xe tiếp thử MỌI vị trí, 2 xe tiếp thử mọi cặp (≤ 6
+    xe; không thì các cặp trong 4 xe trung tâm nhất). Trên 4 trận contest 17/11, lựa chọn
+    tốt nhất của 3/4 trận không nằm trong danh sách cũ (báo cáo 4.11).
+    """
     n = config.n_agents
     cen = centrality(config)
     order = sorted(range(n), key=lambda i: cen[i])
     max_cars = max(0, min(3, n - 2))
+    wide = weights is not None and weights.role_all_positions > 0
     out = [RoleCandidate([rules.PATROL] * n, "0 xe tiếp")]
     for count in range(1, max_cars + 1):
-        picks = [tuple(order[:count])]
-        if count < len(order):
-            alt = tuple(order[:count - 1] + [order[count]])
-            if alt != picks[0]:
-                picks.append(alt)
+        if wide and count == 1:
+            picks = [(i,) for i in order]
+        elif wide and count == 2:
+            pool = order if n <= 6 else order[:4]
+            picks = sorted(itertools.combinations(pool, 2), key=lambda p: (sum(cen[i] for i in p), p))
+        else:
+            picks = [tuple(order[:count])]
+            if count < len(order):
+                alt = tuple(order[:count - 1] + [order[count]])
+                if alt != picks[0]:
+                    picks.append(alt)
         for pick in picks:
             kinds = [rules.PATROL] * n
             for i in pick:
@@ -139,6 +153,26 @@ def _total(parts: Sequence[Tuple[int, int, int]]) -> Tuple[int, int, int]:
     return tuple(sum(p[i] for p in parts) for i in range(3))
 
 
+def _rank_key(score: Tuple[int, int, int], best_d: float, tol: float) -> tuple:
+    """Khoá xếp hạng. tol = 0: đúng (L, D, Q). tol > 0: D trong khoảng tol × D tốt nhất
+    (của các phương án cùng L tốt nhất) coi như hoà, rồi so Q, cuối cùng mới tới D."""
+    if tol <= 0:
+        return tuple(score)
+    return (score[0], score[1] >= best_d - tol * best_d, score[2], score[1])
+
+
+def rank_candidates(cands: Sequence["RoleCandidate"], score_of: Callable[["RoleCandidate"], Tuple[int, int, int]],
+                    tol: float = 0.0) -> List["RoleCandidate"]:
+    """Sắp phương án từ tốt tới kém theo _rank_key (ổn định: hoà thì giữ thứ tự cũ)."""
+    if not cands:
+        return []
+    scores = [tuple(score_of(c)) for c in cands]
+    best_l = max(sc[0] for sc in scores)
+    best_d = max(sc[1] for sc in scores if sc[0] == best_l)
+    keyed = {id(c): _rank_key(sc, best_d, tol) for c, sc in zip(cands, scores)}
+    return sorted(cands, key=lambda c: keyed[id(c)], reverse=True)
+
+
 def _refine_job(job: dict):
     """Việc của một tiến trình con: chơi thử cả trận bằng ALNS theo giây. Trả (điểm, số ngày)."""
     left = job["wall_deadline"] - time.time()
@@ -203,7 +237,9 @@ def select_roles(
     started = time.monotonic()
     deterministic = iterations_per_day is not None
     hard_deadline = None if deterministic else started + max(0.2, budget_seconds)
-    options = candidates(config)
+    options = candidates(config, w)
+    tol = max(0.0, w.role_d_tolerance)
+    seeds = [seed + 7919 * k for k in range(max(1, int(w.role_seeds)))]
     scenarios = role_scenarios(config, w)
     names = [name for name, _ in scenarios]
     no_zero = w.role_traffic > 0 and len(options) > 1 and not zero_cars_allowed(config)
@@ -213,8 +249,44 @@ def select_roles(
             return ""
         return " (" + "; ".join(f"{n}: {p[0]}/{p[1]}/{p[2]}" for n, p in zip(names, parts)) + ")"
 
+    # Vòng 1 song song (chỉ khi theo giây và đã mở rộng ứng viên): trên bản đồ VN 32×32, 18–24
+    # ứng viên × 2 kịch bản tham lam tuần tự mất 50–100 s, quá cửa sổ chọn xe 30–60 s. Chạy
+    # trên Pool như vòng 2, dùng tối đa nửa ngân sách; hỏng thì rơi về vòng tuần tự bên dưới.
+    cpus = os.cpu_count() or 1
+    tried = set()
+    if (not deterministic and w.role_all_positions > 0 and cpus >= 3 and len(options) > 3
+            and hard_deadline - time.monotonic() >= parallel_min_seconds):
+        todo = [c for c in options if not (no_zero and c.n_cars == 0)]
+        half = started + 0.5 * max(0.2, budget_seconds)
+        work = [dict(config=config, kinds=list(c.kinds), forecast=fc, weights=weights, seed=seed,
+                     per_day=0.0, wall_deadline=time.time() + (half - time.monotonic()) - POOL_RETURN_MARGIN)
+                for c in todo for _, fc in scenarios]
+        n_workers = max(1, cpus - 1) if jobs is None else max(1, int(jobs))
+        log(f"vòng 1 song song: {len(work)} lần chơi thử trên {min(n_workers, len(work))} tiến trình")
+        results = _run_parallel(work, min(n_workers, len(work)), half)
+        if results is not None:
+            tried = {id(c) for c in options}
+            k = len(scenarios)
+            for idx, cand in enumerate(todo):
+                chunk = results[idx * k:(idx + 1) * k]
+                if all(r is not None and r[1] >= config.n_days for r in chunk):
+                    parts = [r[0] for r in chunk]
+                    cand.score = _total(parts)
+                    cand.evaluated = True
+                    log(f"vai trò {cand.label}: L={cand.score[0]} D={cand.score[1]} Q={cand.score[2]}{describe(parts)}")
+                    tell(cand, "rollout", cand.score, scenarios=[list(p) for p in parts])
+                else:
+                    log(f"vai trò {cand.label}: bỏ, không kịp chơi thử đủ trận")
+                    tell(cand, "skipped", cand.score, days=0)
+            for cand in options:
+                if no_zero and cand.n_cars == 0:
+                    log(f"vai trò {cand.label}: bỏ, xăng không đủ dư để chạy không xe tiếp")
+                    tell(cand, "skipped", cand.score, days=0)
+
     # Vòng 1: rollout tham lam toàn bộ phương án, tất định và rẻ.
     for cand in options:
+        if cand.evaluated or id(cand) in tried:
+            continue
         if hard_deadline is not None and time.monotonic() >= hard_deadline:
             break
         if no_zero and cand.n_cars == 0:
@@ -239,7 +311,7 @@ def select_roles(
         log(f"vai trò {cand.label}: L={cand.score[0]} D={cand.score[1]} Q={cand.score[2]}{describe(parts)}")
         tell(cand, "rollout", cand.score, scenarios=[list(p) for p in parts])
 
-    ranked = sorted([c for c in options if c.evaluated], key=lambda c: c.score, reverse=True)
+    ranked = rank_candidates([c for c in options if c.evaluated], lambda c: c.score, tol)
     if not ranked:
         fallback = options[1] if len(options) > 1 else options[0]
         return list(fallback.kinds), options
@@ -251,14 +323,27 @@ def select_roles(
         tell(cand, "refine", cand.refined, scenarios=[list(p) for p in parts])
 
     # Vòng 2: nếu còn thời gian, đánh giá lại các phương án dẫn đầu bằng ALNS thật.
-    finalists = ranked[:2]
+    n_final = int(w.role_finalists)
+    finalists = ranked[:n_final if n_final > 0 else 2]
+
+    def choose(final: Sequence[RoleCandidate]) -> RoleCandidate:
+        # tol = 0: như cũ (điểm tốt hơn giữa vòng 1 và vòng 2). tol > 0: chỉ so các phương án
+        # đã tinh chỉnh xong (điểm vòng 2 cùng số seed nên so được); chưa đủ hai phương án xong
+        # thì theo thứ hạng vòng 1, vì trộn tổng tham lam với tổng ALNS nhiều seed là so lệch
+        if tol > 0:
+            done_ = [c for c in final if c.refined != (0, 0, 0)]
+            if len(done_) >= 2:
+                return rank_candidates(done_, lambda c: c.refined, tol)[0]
+            return final[0]
+        return max(final, key=lambda c: c.best())
+
     if deterministic:
         if len(finalists) > 1:
             for cand in finalists:
-                refined(cand, [rollout(config, cand.kinds, forecast, weights=weights, seed=seed,
-                                       iterations_per_day=iterations_per_day)
+                refined(cand, [_total([rollout(config, cand.kinds, forecast, weights=weights, seed=sd,
+                                               iterations_per_day=iterations_per_day) for sd in seeds])
                                for _, forecast in scenarios])
-            best = max(finalists, key=lambda c: c.best())
+            best = choose(finalists)
         else:
             best = ranked[0]
         log(f"chọn: {best.label}")
@@ -270,8 +355,11 @@ def select_roles(
     parallel = remaining >= parallel_min_seconds and workers >= 2 and cpus >= 3 and len(ranked) > 1
     done = False
     if parallel:
-        finalists = ranked[:3]
-        work = [(cand, forecast) for cand in finalists for _, forecast in scenarios]
+        finalists = ranked[:n_final if n_final > 0 else 3]
+        # theo giây: bớt seed cho vừa MỘT lượt tiến trình, vì lượt thứ hai hay không kịp hạn
+        # (đo 18/11: 16 việc trên 11 tiến trình thì chỉ 2/4 phương án tinh chỉnh xong)
+        seeds_rt = seeds[:max(1, workers // max(1, len(finalists) * len(scenarios)))]
+        work = [(cand, forecast, sd) for cand in finalists for _, forecast in scenarios for sd in seeds_rt]
         workers = min(workers, len(work))
         rounds = -(-len(work) // workers)
         usable = remaining - POOL_STARTUP_SECONDS - POOL_RETURN_MARGIN
@@ -279,38 +367,41 @@ def select_roles(
         wall_deadline = time.time() + remaining - POOL_RETURN_MARGIN
         log(f"tinh chỉnh song song {len(work)} việc trên {workers} tiến trình, {per_day:.2f}s/ngày")
         results = _run_parallel(
-            [dict(config=config, kinds=list(cand.kinds), forecast=forecast, weights=weights, seed=seed,
-                  per_day=per_day, wall_deadline=wall_deadline) for cand, forecast in work],
+            [dict(config=config, kinds=list(cand.kinds), forecast=forecast, weights=weights, seed=sd,
+                  per_day=per_day, wall_deadline=wall_deadline) for cand, forecast, sd in work],
             workers, hard_deadline)
         if results is not None:
             done = True
-            k = len(scenarios)
+            k = len(scenarios) * len(seeds_rt)
             for idx, cand in enumerate(finalists):
                 chunk = results[idx * k:(idx + 1) * k]
                 if all(r is not None and r[1] >= config.n_days for r in chunk):
-                    refined(cand, [r[0] for r in chunk])
+                    # mỗi kịch bản: cộng các seed (mọi phương án cùng số seed nên so được)
+                    ns = len(seeds_rt)
+                    refined(cand, [_total([r[0] for r in chunk[j * ns:(j + 1) * ns]])
+                                   for j in range(len(scenarios))])
                 else:
                     log(f"tinh chỉnh {cand.label}: không kịp chơi đủ trận, giữ điểm vòng 1")
         else:
             log("không mở được tiến trình con: tinh chỉnh tuần tự")
-            finalists = ranked[:2]
+            finalists = ranked[:n_final if n_final > 0 else 2]
     if not done and remaining > 1.0 and len(finalists) > 1:
         remaining = hard_deadline - time.monotonic()
-        per_job = remaining / (len(finalists) * len(scenarios))
+        per_job = remaining / (len(finalists) * len(scenarios) * len(seeds))
         per_day = max(0.05, per_job / max(1, config.n_days))
         for cand in finalists:
             if time.monotonic() >= hard_deadline:
                 break
             parts = []
             for _, forecast in scenarios:
-                parts.append(rollout(
-                    config, cand.kinds, forecast, weights=weights, seed=seed,
+                parts.append(_total([rollout(
+                    config, cand.kinds, forecast, weights=weights, seed=sd,
                     deadline=min(hard_deadline, time.monotonic() + per_job),
                     seconds_per_day=per_day,
-                ))
+                ) for sd in seeds]))
             refined(cand, parts)
         done = True
-    best = max(finalists, key=lambda c: c.best()) if done and len(finalists) > 1 else ranked[0]
+    best = choose(finalists) if done and len(finalists) > 1 else ranked[0]
 
     log(f"chọn: {best.label}")
     return list(best.kinds), options

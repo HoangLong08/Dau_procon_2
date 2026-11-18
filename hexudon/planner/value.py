@@ -261,7 +261,14 @@ def default_model() -> Optional[ValueModel]:
     return _CACHE[path]
 
 
-def learned_end_value(ctx: DayContext, result, w: Weights, model: ValueModel) -> float:
-    """end_value khi value_weight > 0: luật cứng giữ nguyên, phần mềm là value_weight × B × V."""
+def learned_parts(ctx: DayContext, result, w: Weights, model: ValueModel):
+    """(phần cứng, phần mềm) của learned_end_value, để objective kẹp riêng phần mềm."""
     st = _EndState(ctx, result)
-    return hard_terms(ctx, result, w, st) + w.value_weight * w.B * model.predict(features(ctx, result, st))
+    return hard_terms(ctx, result, w, st), w.value_weight * w.soft * model.predict(features(ctx, result, st))
+
+
+def learned_end_value(ctx: DayContext, result, w: Weights, model: ValueModel) -> float:
+    """end_value khi value_weight > 0: luật cứng giữ nguyên, phần mềm là value_weight × đơn vị mềm × V
+    (đơn vị mềm = Weights.soft: B, hoặc soft_unit khi > 0)."""
+    st = _EndState(ctx, result)
+    return hard_terms(ctx, result, w, st) + w.value_weight * w.soft * model.predict(features(ctx, result, st))

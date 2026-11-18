@@ -22,7 +22,7 @@ def day0_context(weights):
 
 class TestQPhase(unittest.TestCase):
     def test_soft_terms_are_scaled_and_guards_are_kept(self):
-        w = Weights(q_end_scale=0.1)
+        w = Weights(q_end_scale=0.1, q_B=0.0)
         q = q_phase_weights(w)
         for name in engine.SOFT_END_TERMS:
             self.assertAlmostEqual(getattr(q, name), getattr(w, name) * 0.1)
@@ -37,7 +37,7 @@ class TestQPhase(unittest.TestCase):
             self.assertAlmostEqual(getattr(q, name) * q.B, getattr(w, name) * w.B)
         self.assertEqual(q.serving, w.serving)
         # q_B = 0 giữ B như pha 1
-        self.assertEqual(q_phase_weights(Weights()).B, Weights().B)
+        self.assertEqual(q_phase_weights(Weights(q_B=0.0)).B, Weights().B)
         ctx = day0_context(w)
         final = plan_day(ctx, seed=4, max_iterations=120)
         self.assertTrue(final.result.ok)

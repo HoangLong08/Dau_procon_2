@@ -138,8 +138,14 @@ class MatchStrategist:
             extra["on_candidate"] = lambda row: emit("roles_candidate", row)
         if self.role_iterations is not None:      # chỉ benchmark offline; khi thi lời gọi như cũ
             extra["iterations_per_day"] = self.role_iterations
+        # chơi thử cả trận từ ngày 0: chưa biết D có an toàn không, nên với soft_auto thì hạng
+        # mục mềm theo B như ngày 0 thật (day_weights); để soft_unit cố định thì đổi cả cách
+        # chia xe (đã đo: mất 1 chuỗi L ở bản đồ Nhật trận 4, sảnh L2, seed 2)
+        role_weights = self.weights
+        if role_weights.soft_auto > 0 and role_weights.soft_unit > 0:
+            role_weights = dataclasses.replace(role_weights, soft_unit=0.0)
         kinds, options = select_roles(
-            self.config, budget_seconds=budget, weights=self.weights, seed=self.seed, log=self.log, **extra
+            self.config, budget_seconds=budget, weights=role_weights, seed=self.seed, log=self.log, **extra
         )
         self.kinds = kinds
         self._reset_forecast(TrafficForecast(
@@ -299,9 +305,10 @@ class MatchStrategist:
                 status, self.status_yesterday, own_stay_yesterday=self.own_stay_yesterday,
                 floor_today=state.day == 1,
             )
+        day_weights = self.day_weights()
         ctx = make_context(
             cfg, state.day, agents, status, [s.stocks for s in cfg.spots],
-            self.visited_brands, weights=self.weights, forecast_status=forecast_status,
+            self.visited_brands, weights=day_weights, forecast_status=forecast_status,
             steps_override=steps_override,
         )
         # theo số vòng thì chỉ chặn giờ khi server có hạn thật (phòng hờ)
@@ -312,7 +319,7 @@ class MatchStrategist:
         sent = {"count": 0, "decoded": None, "gain": None}
         self.last_sent = None
         on_safe, hooks = self._watch(state, agents, status, ctx.steps, started)
-        look = self._lookahead(state, status, ctx.steps)
+        look = self._lookahead(state, status, ctx.steps, weights=day_weights)
 
         # R7: giao các seed phụ trước khi tự tìm, để chúng chạy cùng lúc
         extra_seeds = [self.seed + 7919 * k for k in range(1, self.search_jobs)]
@@ -322,7 +329,7 @@ class MatchStrategist:
         if extra_seeds:
             base_job = DayJob(
                 day=state.day, kinds=list(self.kinds), agents=agents, status=status,
-                visited=set(self.visited_brands), weights=self.weights, forecast_status=forecast_status,
+                visited=set(self.visited_brands), weights=day_weights, forecast_status=forecast_status,
                 steps_override=steps_override, seed=self.seed, max_iterations=max_iterations,
                 forecast=self.forecast if look is not None else None,
                 status_yesterday=self.status_yesterday, stay_yesterday=self.own_stay_yesterday,
@@ -450,7 +457,23 @@ class MatchStrategist:
         old = self._roll_seconds
         self._roll_seconds = seconds if old is None else max(seconds, 0.5 * (old + seconds))
 
-    def _lookahead(self, state: DayState, status: Dict[int, int], steps: int):
+    def day_weights(self) -> Weights:
+        """Trọng số cho ngày sắp lập kế hoạch.
+
+        soft_auto > 0 (cùng soft_unit > 0): hạng mục cuối ngày mềm chỉ tính theo soft_unit khi
+        D đã an toàn, tức đã đủ L (mọi chuỗi đã thu trong trận) và ngày hôm trước đạt trần D;
+        ngày khác (ngày 0, hoặc vừa hụt chuỗi) dùng B như cũ để giữ D.
+        """
+        w = self.weights
+        if w.soft_unit <= 0 or w.soft_auto <= 0:
+            return w
+        n = len(self.config.brands)
+        safe = (len(self.visited_brands) >= n and bool(self.history)
+                and self.history[-1].get("types", 0) >= n)
+        return w if safe else dataclasses.replace(w, soft_unit=0.0)
+
+    def _lookahead(self, state: DayState, status: Dict[int, int], steps: int,
+                   weights: Optional[Weights] = None):
         """Hàm chấm một bài hôm nay bằng (chuỗi mới, D, Q) của các ngày sau (R4), hoặc None.
 
         Chơi tiếp bằng bộ dựng tham lam từ trạng thái cuối ngày của bài, với giao thông
@@ -466,7 +489,7 @@ class MatchStrategist:
         status_today = dict(status)
         status_yesterday = self.status_yesterday
         stay_yesterday = self.own_stay_yesterday
-        weights = self.weights
+        weights = weights or self.weights
         forecast = self.forecast
         seed = self.seed
         day = state.day
