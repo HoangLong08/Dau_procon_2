@@ -221,7 +221,11 @@ class ValueModel:
         if names != FEATURE_NAMES:
             raise ValueError("đặc trưng của mô hình không khớp FEATURE_NAMES")
         self.kind = data.get("kind", "cay")
-        self.residual = data.get("mode", "thay") == "phan_du"
+        self.mode = data.get("mode", "thay")
+        self.residual = self.mode == "phan_du"
+        #: V-VN "thay_ev" (19/11/2026): học trên gốc điểm hôm nay, nên ở ngày dùng V-VN thì bỏ hẳn
+        #: hạng mục mềm tự viết (và V1), chỉ giữ hạng mục cứng
+        self.replaces_soft = self.mode == "thay_ev"
         self.layers = None
         if self.kind == "tuyen_tinh":
             self.coef = [float(c) for c in data["coef"]]

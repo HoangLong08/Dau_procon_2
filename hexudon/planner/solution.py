@@ -143,12 +143,18 @@ class Weights:
     #: Bật từ 18/11: cùng điểm xuất phát với DAU 2, số ngày thiếu D từ 3 về 0
     today_chain_first: float = 1.0
 
-    # --- hàm giá trị V-VN theo số phần (18/11/2026, planner/value_model_vn.json). 0 là như trước ---
-    #: > 0: ở ngày D an toàn (soft_unit > 0), phần mềm cộng value_q_weight × V_vn (số phần tương lai
-    #: dự đoán, so với các nghiệm cùng ngày). Học bằng thi_nghiem_ai/hoc_v_vn.py
-    value_q_weight: float = 0.0
+    # --- hàm giá trị V-VN theo số phần (18–19/11/2026, planner/value_model_vn.json) ---
+    #: > 0: ở ngày D an toàn (soft_unit > 0) dùng V_vn (số phần 2 ngày sau, học bằng
+    #: thi_nghiem_ai/hoc_v_vn.py trên 400 bản đồ kiểu VN). Mô hình đi kèm là "thay_ev": phần mềm
+    #: = value_q_weight × V_vn (+ V_near nếu value_q_keep_near), bỏ hạng mục mềm tự viết và V1.
+    #: Bật từ 19/11: cả trận 48 cặp VN +5,5 Q/trận (contest +19,7), ΔD −1; sảnh 10 đội ΔD +0,16.
+    #: 0 là như trước 19/11
+    value_q_weight: float = 1.0
     #: > 0: ở những ngày dùng V-VN thì bỏ V1 (value_weight), chỉ giữ V-VN
     value_q_replace: float = 0.0
+    #: > 0: với mô hình V-VN "thay_ev" vẫn giữ hạng mục V_near (chuỗi với tới nửa ngày mai) nhân
+    #: hệ số này, vì mô hình chỉ học số phần còn D ngày mai cần V_near (19/11/2026)
+    value_q_keep_near: float = 1.0
 
     @property
     def soft(self) -> float:

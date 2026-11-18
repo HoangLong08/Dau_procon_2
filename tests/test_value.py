@@ -48,7 +48,7 @@ class FeatureTest(unittest.TestCase):
 
     def test_hard_terms_equal_end_value_without_its_soft_terms(self):
         no_soft = {"urgency": 0.0, "end_on_spot": 0.0, "near_chain": 0.0, "fuel_bonus": 0.0, "road_park": 0.0,
-                   "value_weight": 0.0}
+                   "value_weight": 0.0, "value_q_weight": 0.0}
         for ctx, dec in sample_states():
             w = dataclasses.replace(ctx.weights, **no_soft)
             legacy = end_value(dataclasses.replace(ctx, weights=w), dec.result)
@@ -99,7 +99,7 @@ class ObjectiveTest(unittest.TestCase):
     def test_value_weight_zero_never_touches_the_learned_value(self):
         self.assertEqual(Weights().value_weight, 1.0, "B4 bật mặc định từ 17/11/2026")
         ctx, dec = sample_states(days=(1,))[0]
-        c = dataclasses.replace(ctx, weights=Weights(value_weight=0.0))
+        c = dataclasses.replace(ctx, weights=Weights(value_q_weight=0.0, value_weight=0.0))
         with mock.patch.object(objective, "learned_parts") as spy,                 mock.patch.object(objective, "features") as feats:
             end_value(c, dec.result)
         spy.assert_not_called()
@@ -108,13 +108,13 @@ class ObjectiveTest(unittest.TestCase):
     def test_value_weight_replaces_the_soft_terms(self):
         ctx, dec = sample_states(days=(1,))[0]
         m = ValueModel(stump_model(feature=0, threshold=100.0, low=2.0, high=0.0, init=0.0))
-        w = Weights(value_weight=0.5)
+        w = Weights(value_q_weight=0.0, value_weight=0.5)
         c = dataclasses.replace(ctx, weights=w)
         with mock.patch.object(objective, "default_model", return_value=m):
             got = end_value(c, dec.result)
         # phần mềm theo đơn vị Weights.soft (B khi soft_unit = 0, soft_unit từ 18/11/2026)
         self.assertAlmostEqual(got, hard_terms(ctx, dec.result, w) + 0.5 * w.soft * 2.0)
-        w0 = Weights(value_weight=0.5, soft_unit=0.0)
+        w0 = Weights(value_q_weight=0.0, value_weight=0.5, soft_unit=0.0)
         with mock.patch.object(objective, "default_model", return_value=m):
             got0 = end_value(dataclasses.replace(ctx, weights=w0), dec.result)
         self.assertAlmostEqual(got0, hard_terms(ctx, dec.result, w0) + 0.5 * w0.B * 2.0)
@@ -127,16 +127,16 @@ class ObjectiveTest(unittest.TestCase):
         self.assertTrue(m.residual)
         x = features(ctx, dec.result)
         self.assertAlmostEqual(m.predict(x), 0.25 * x[0])
-        c = dataclasses.replace(ctx, weights=Weights(value_weight=0.5))
-        hand = end_value(dataclasses.replace(ctx, weights=Weights(value_weight=0.0)), dec.result)
+        c = dataclasses.replace(ctx, weights=Weights(value_q_weight=0.0, value_weight=0.5))
+        hand = end_value(dataclasses.replace(ctx, weights=Weights(value_q_weight=0.0, value_weight=0.0)), dec.result)
         with mock.patch.object(objective, "default_model", return_value=m):
             got = end_value(c, dec.result)
         self.assertAlmostEqual(got, hand + 0.5 * Weights().soft * 0.25 * x[0])
 
     def test_missing_model_falls_back_to_the_old_end_value(self):
         ctx, dec = sample_states(days=(1,))[0]
-        c = dataclasses.replace(ctx, weights=Weights(value_weight=1.0))
-        hand = end_value(dataclasses.replace(ctx, weights=Weights(value_weight=0.0)), dec.result)
+        c = dataclasses.replace(ctx, weights=Weights(value_q_weight=0.0, value_weight=1.0))
+        hand = end_value(dataclasses.replace(ctx, weights=Weights(value_q_weight=0.0, value_weight=0.0)), dec.result)
         with mock.patch.object(objective, "default_model", return_value=None):
             self.assertEqual(end_value(c, dec.result), hand)
 
@@ -145,18 +145,18 @@ class ObjectiveTest(unittest.TestCase):
         kinds = candidates(cfg)[1].kinds
         agents = [AgentState(kinds[i], cfg.agent_starts[i], cfg.fuel_limits) for i in range(cfg.n_agents)]
         ctx = make_context(cfg, cfg.n_days - 1, agents, {}, [s.stocks for s in cfg.spots], set(),
-                           weights=Weights(value_weight=1.0))
+                           weights=Weights(value_q_weight=0.0, value_weight=1.0))
         _, dec = safe_solution(ctx, 0)
         self.assertEqual(end_value(ctx, dec.result), 0.0)
 
     def test_q_phase_scales_the_learned_value_like_other_soft_terms(self):
         self.assertIn("value_weight", SOFT_END_TERMS)
-        q = q_phase_weights(Weights(value_weight=1.0, q_end_scale=0.1))
+        q = q_phase_weights(Weights(value_q_weight=0.0, value_weight=1.0, q_end_scale=0.1))
         self.assertAlmostEqual(q.value_weight, 0.1)
 
     def test_plan_day_with_the_learned_value_stays_valid(self):
         ctx, _ = sample_states(days=(1,))[0]
-        c = dataclasses.replace(ctx, weights=Weights(value_weight=1.0))
+        c = dataclasses.replace(ctx, weights=Weights(value_q_weight=0.0, value_weight=1.0))
         dec = plan_day(c, seed=0, max_iterations=40)
         self.assertTrue(dec.result.ok)
 
@@ -206,7 +206,7 @@ class MlpModelTest(unittest.TestCase):
         ctx, dec = sample_states(days=(1,))[0]
         m = ValueModel(mlp_model(seed=5))
         x = features(ctx, dec.result)
-        base_w = Weights(value_weight=0.0)
+        base_w = Weights(value_q_weight=0.0, value_weight=0.0)
         base = end_value(dataclasses.replace(ctx, weights=base_w), dec.result)
         with mock.patch.object(objective, "default_model_vn", return_value=m):
             on = end_value(dataclasses.replace(ctx, weights=Weights(value_weight=0.0, value_q_weight=0.5)),
@@ -214,5 +214,45 @@ class MlpModelTest(unittest.TestCase):
             off_day = end_value(dataclasses.replace(ctx, weights=Weights(value_weight=0.0, value_q_weight=0.5,
                                                                            soft_unit=0.0)), dec.result)
         self.assertAlmostEqual(on, base + 0.5 * Weights().serving * m.predict(x), places=6)
-        base0 = end_value(dataclasses.replace(ctx, weights=Weights(value_weight=0.0, soft_unit=0.0)), dec.result)
+        base0 = end_value(dataclasses.replace(ctx, weights=Weights(value_q_weight=0.0, value_weight=0.0, soft_unit=0.0)), dec.result)
         self.assertAlmostEqual(off_day, base0, places=6, msg="ngày chưa an toàn (soft_unit = 0): không dùng V-VN")
+
+    def test_replacing_vn_model_drops_the_hand_soft_terms(self):
+        """Mô hình "thay_ev" (học trên gốc điểm hôm nay): ngày an toàn chỉ còn hạng mục cứng + V-VN."""
+        from hexudon.planner.objective import _hand_parts
+        ctx, dec = sample_states(days=(1,))[0]
+        data = mlp_model(seed=7)
+        data["mode"] = "thay_ev"
+        m = ValueModel(data)
+        self.assertTrue(m.replaces_soft)
+        self.assertFalse(m.residual)
+        x = features(ctx, dec.result)
+        w = Weights(value_q_weight=2.0, value_q_keep_near=0.0)
+        c = dataclasses.replace(ctx, weights=w)
+        hard, _ = _hand_parts(c, dec.result)
+        wn = Weights(value_q_weight=2.0, value_q_keep_near=1.0)
+        cn = dataclasses.replace(ctx, weights=wn)
+        with mock.patch.object(objective, "default_model_vn", return_value=m):
+            got = end_value(c, dec.result)
+            got_near = end_value(cn, dec.result)
+            unsafe = end_value(dataclasses.replace(ctx, weights=Weights(value_q_weight=2.0, soft_unit=0.0)),
+                               dec.result)
+        self.assertAlmostEqual(got, hard + 2.0 * w.serving * m.predict(x), places=6)
+        patrols = [dec.result.end_pos[i] for i in ctx.patrols]
+        near = objective._near_chains(cn, patrols)
+        self.assertAlmostEqual(got_near, got + wn.near_chain * wn.soft * near, places=6,
+                               msg="value_q_keep_near giữ đúng hạng mục V_near")
+        ref = end_value(dataclasses.replace(ctx, weights=Weights(soft_unit=0.0)), dec.result)
+        self.assertAlmostEqual(unsafe, ref, places=6, msg="ngày chưa an toàn: giữ nguyên end_value cũ")
+
+
+class VnDefaultTest(unittest.TestCase):
+    """19/11/2026: V-VN bật mặc định với mô hình "thay_ev" đi kèm."""
+
+    def test_defaults_and_shipped_model(self):
+        from hexudon.planner.value import MODEL_VN_PATH
+        w = Weights()
+        self.assertEqual((w.value_q_weight, w.value_q_keep_near, w.value_q_replace), (1.0, 1.0, 0.0))
+        m = ValueModel.load(MODEL_VN_PATH)
+        self.assertTrue(m.replaces_soft)
+        self.assertEqual(m.unit, "phan")

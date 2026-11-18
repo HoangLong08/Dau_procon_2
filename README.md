@@ -352,6 +352,21 @@ chạm trần mọi ngày, nên số phần Q quyết định. Ta thua DAU 2 37�
 - Trên bản đồ VN, số vòng mỗi giây tăng 1,3–1,45 lần: 224 → 325, 299 → 394, 419 → 539.
 - `tests/test_speed_golden.py` giữ đúng từng bài như trước khi tăng tốc. Nếu cố ý đổi hành vi của planner thì chụp lại bằng `python -m tests.test_speed_golden --tao`.
 
+**Hàm giá trị học được theo số phần, V-VN (bật từ 19/11/2026):**
+- Dùng ở ngày D an toàn, tức những ngày hạng mục cuối ngày tính bằng phần.
+- Phần mềm của giá trị cuối ngày = `value_q_weight × V_vn`, cộng hạng mục "chuỗi gần" (`value_q_keep_near`).
+  - Các hạng mục mềm tự viết khác và V1 bị bỏ.
+  - Luật giữ L, D (xe kẹt xăng…) vẫn theo B.
+- `V_vn` là cây GBDT dự đoán số phần 2 ngày sau, đọc từ `planner/value_model_vn.json`.
+  - Học trên 400 bản đồ sinh theo phân bố server VN.
+  - Ngoài tập học, cách chấm cũ bỏ lỡ 8.661 phần so với lựa chọn tốt nhất; chỉ xét hôm nay bỏ lỡ 7.584; V-VN bỏ lỡ 7.204.
+- **Kết quả đo:**
+  - Cả trận, 4 bản đồ contest và 12 bản đồ sinh, 3 seed: Q +5,5 ± 2,3 mỗi trận (riêng contest +19,7), tổng D −1 trên 48 trận.
+  - Số trận không đạt trần D giảm từ 4/45 xuống 1/45.
+  - Sảnh 10 đội kiểu Nhật: ΔD +0,16, không mất L.
+- `value_q_weight = 0` tái hiện đúng hành vi 18/11. Biến thể đó là `mac_dinh_18_11` trong `thi_nghiem_ai/doi_chieu_dau2.py`.
+- Học lại: `thi_nghiem_ai/du_lieu_v_vn.py`, rồi `hoc_v_vn.py --goc hom_nay --xuat --loai cay --h 2 --K 0`.
+
 ### Cách chia thời gian trong một ngày
 
 Bot gửi **bài an toàn** trong khoảng 10 ms sau khi nhận trạng thái, rồi tiếp tục

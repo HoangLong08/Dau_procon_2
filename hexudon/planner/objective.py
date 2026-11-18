@@ -37,7 +37,15 @@ def end_value(ctx: DayContext, result: DayResult) -> float:
     # V-VN (18/11/2026): ở ngày D an toàn (soft_unit > 0), cộng value_q_weight × V_vn theo SỐ PHẦN;
     # value_q_replace > 0 thì bỏ V1 (học D + Q/B trên bản đồ kiểu Nhật) ở những ngày đó
     vn = default_model_vn() if (w.value_q_weight > 0 and w.soft_unit > 0) else None
-    if w.value_weight > 0 and not (vn is not None and w.value_q_replace > 0):
+    if vn is not None and vn.replaces_soft:
+        # mô hình "thay_ev" học trên gốc điểm hôm nay: hạng mục mềm tự viết và V1 bỏ hẳn
+        hard, _ = _hand_parts(ctx, result)
+        soft = 0.0
+        if w.value_q_keep_near > 0:
+            # giữ V_near: mô hình chỉ học số phần, còn chuẩn bị cho D ngày mai (ngày ngắn) cần nó
+            patrols = [result.end_pos[i] for i in ctx.patrols]
+            soft = w.value_q_keep_near * w.near_chain * w.soft * _near_chains(ctx, patrols)
+    elif w.value_weight > 0 and not (vn is not None and w.value_q_replace > 0):
         model = default_model()
         if model is not None:
             if model.residual:
@@ -105,14 +113,7 @@ def _hand_parts(ctx: DayContext, result: DayResult):
             soft += w.end_on_spot * U + w.serving
 
     # V_near: chuỗi có thể với tới trong nửa ngày mai
-    if ctx.next_steps > 0:
-        reach = 0.5 * ctx.next_steps
-        near = 0
-        for brand in cfg.brands:
-            best = min((_dist_to_brand(ctx, c, brand) for c in patrol_cells), default=INF)
-            if best <= reach:
-                near += 1
-        soft += w.near_chain * U * near
+    soft += w.near_chain * U * _near_chains(ctx, patrol_cells)
 
     # V_fuel: xe kẹt xăng nhiều ngày; thích kết thúc đầy bình. Xăng tính theo ô
     # ĐANG ĐỨNG: còn 1 xăng trên núi hoặc đường là kẹt, trên đồng bằng thì chưa (cases 7.11)
@@ -130,6 +131,19 @@ def _hand_parts(ctx: DayContext, result: DayResult):
     own_road_stay = sum(v for cell, v in result.stay.items() if cfg.cells[cell] == rules.ROAD)
     soft -= w.road_park * U * own_road_stay / max(1, cfg.players)
     return value, soft
+
+
+def _near_chains(ctx: DayContext, patrol_cells) -> int:
+    """Số chuỗi xe tuần tra với tới trong nửa ngày mai (hạng mục V_near)."""
+    if ctx.next_steps <= 0:
+        return 0
+    reach = 0.5 * ctx.next_steps
+    near = 0
+    for brand in ctx.config.brands:
+        best = min((_dist_to_brand(ctx, c, brand) for c in patrol_cells), default=INF)
+        if best <= reach:
+            near += 1
+    return near
 
 
 def score_day(ctx: DayContext, result: DayResult, truncated: int = 0, dropped_meets: int = 0) -> float:

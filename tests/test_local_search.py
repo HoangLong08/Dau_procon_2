@@ -53,7 +53,8 @@ class SoftUnitTest(unittest.TestCase):
         for seed in range(4):
             ctx = make_ctx(seed, Weights(soft_unit=0.0))
             sol, dec = safe_solution(ctx, seed)
-            c = dataclasses.replace(ctx, weights=Weights(soft_unit=ctx.weights.B))
+            # V-VN chỉ chạy khi soft_unit > 0: tắt để so đúng hạng mục tự viết
+            c = dataclasses.replace(ctx, weights=Weights(soft_unit=ctx.weights.B, value_q_weight=0.0))
             self.assertAlmostEqual(end_value(ctx, dec.result), end_value(c, dec.result), places=6)
 
     def test_small_soft_unit_never_trades_a_chain_today(self):
