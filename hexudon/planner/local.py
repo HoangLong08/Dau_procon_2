@@ -26,7 +26,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 
-from .construct import InsertionState
+from .construct import InsertionState, neighbours
 from .decoder import Decoded, decode
 from .objective import lexicographic_gain
 from .solution import DayContext, DaySolution, Meet
@@ -196,7 +196,7 @@ def _propose(ctx: DayContext, sol: DaySolution, move: str, rng: random.Random,
             pool = [s for s in ctx.config.spots_by_brand.get(ctx.spot_brand[old], ()) if s not in in_tour]
         else:
             prev = ctx.spot_cells[tours[slot][i - 1]] if i > 0 else ctx.start_of_patrol(slot)
-            near = InsertionState(ctx, sol).near.of(prev)
+            near = neighbours(ctx).of(prev)
             pool = [s for s in near if s not in in_tour]
         if not pool:
             return None

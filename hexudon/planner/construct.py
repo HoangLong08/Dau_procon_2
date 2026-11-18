@@ -34,13 +34,29 @@ class SpotNeighbours:
         return out
 
 
+def neighbours(ctx: DayContext) -> SpotNeighbours:
+    """Bảng spot gần nhất của ngữ cảnh, dựng một lần rồi dùng chung cho mọi phép sửa.
+
+    Trước 18/11/2026 mỗi InsertionState dựng bảng mới nên mất bộ nhớ đệm sau mỗi vòng
+    ALNS (605 nghìn lần gọi `of` cho 1.500 vòng trên bản đồ VN). Bảng chỉ phụ thuộc
+    dist_step và vị trí spot, không phụ thuộc trọng số, nên kết quả không đổi.
+    """
+    near = ctx.__dict__.get("_near")
+    if near is None:
+        near = SpotNeighbours(ctx)
+        ctx.__dict__["_near"] = near
+    return near
+
+
 class InsertionState:
     """Trạng thái kế toán để đánh giá phép chèn trong O(1)."""
 
     def __init__(self, ctx: DayContext, sol: Optional[DaySolution] = None):
         self.ctx = ctx
         self.sol = sol.copy() if sol is not None else ctx.empty_solution()
-        self.near = SpotNeighbours(ctx)
+        self.near = neighbours(ctx)
+        #: ô của từng điểm dừng theo tour, giữ khớp với self.sol.tours (chỉ apply sửa tour)
+        self.cells: List[List[int]] = []
         self.allowance: List[float] = []
         self.tour_steps: List[float] = []
         self.tour_fuel: List[float] = []
@@ -52,7 +68,8 @@ class InsertionState:
         self._recompute()
 
     def _cells_of(self, slot: int) -> List[int]:
-        return [self.ctx.spot_cells[s] for s in self.sol.tours[slot]]
+        """Ô của các điểm dừng trong tour `slot` (danh sách lưu sẵn, KHÔNG được sửa)."""
+        return self.cells[slot]
 
     def _recompute(self):
         ctx = self.ctx
@@ -62,6 +79,7 @@ class InsertionState:
         self.tour_fuel = []
         self.targeted = {}
         self.covered = {}
+        self.cells = [[ctx.spot_cells[s] for s in tour] for tour in self.sol.tours]
         for slot in range(ctx.n_patrols):
             fuel0 = ctx.fuel_of_patrol(slot)
             self.allowance.append(fuel0 + (ctx.config.fuel_limits if has_car else 0))
@@ -137,6 +155,7 @@ class InsertionState:
 
     def apply(self, slot: int, pos: int, spot: int, dsteps: float, dfuel: float):
         self.sol.tours[slot].insert(pos, spot)
+        self.cells[slot].insert(pos, self.ctx.spot_cells[spot])
         # điểm hẹn và lệnh đợi đi theo điểm dừng của chúng, không đứng yên ở chỉ số cũ
         if self.sol.meets:
             self.sol.meets = [Meet(m.patrol, m.stop_idx + 1, m.car)

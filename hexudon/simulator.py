@@ -163,13 +163,15 @@ def run_day(
         if e is not None:
             return DayResult(ok=False, error=e)
 
-    for t in range(1, steps + 1):
+    patrols = [i for i in range(n) if kind[i] == rules.PATROL]
+    cars = [i for i in range(n) if kind[i] == rules.REFUEL]
+    everyone = range(n)
+    t = 1
+    while t <= steps:
         # 1. trừ nhiên liệu
-        for i in range(n):
+        for i in patrols:
             p = pending[i]
             if p is None or p[0] != t or p[1] < 0:
-                continue
-            if kind[i] != rules.PATROL:
                 continue
             cost = rules.fuel_cost(cells[p[2]])
             if fuel[i] < cost:
@@ -179,14 +181,12 @@ def run_day(
                 )
             fuel[i] -= cost
         # 2. áp dụng di chuyển
-        for i in range(n):
+        for i in everyone:
             p = pending[i]
             if p is not None and p[0] == t and p[1] >= 0:
                 pos[i] = p[1]
         # 3. thu udon, theo chỉ số agent
-        for i in range(n):
-            if kind[i] != rules.PATROL:
-                continue
+        for i in patrols:
             s = spot_at.get(pos[i])
             if s is None or s in collected[i] or stocks[s] <= 0:
                 continue
@@ -194,28 +194,41 @@ def run_day(
             collected[i].add(s)
             collections.append((t, i, s))
         # 4. tiếp nhiên liệu
-        refuel_cells = {pos[i] for i in range(n) if kind[i] == rules.REFUEL}
-        if refuel_cells:
-            for i in range(n):
-                if kind[i] == rules.PATROL and pos[i] in refuel_cells:
+        if cars:
+            refuel_cells = {pos[i] for i in cars}
+            for i in patrols:
+                if pos[i] in refuel_cells:
                     fuel[i] = fuel_limit
         # 5. cập nhật giao thông
-        for i in range(n):
+        for i in everyone:
             c = pos[i]
             stay[c] = stay.get(c, 0) + 1
         if trace is not None:
             trace.append((t, list(pos), list(fuel)))
         # dọn pending đã xong
-        for i in range(n):
+        for i in everyone:
             if pending[i] is not None and pending[i][0] == t:
                 pending[i] = None
         # pha hành động (bước cuối không có)
         if t < steps:
-            for i in range(n):
+            for i in everyone:
                 if pending[i] is None:
                     e = issue(i, t)
                     if e is not None:
                         return DayResult(ok=False, error=e)
+            if trace is None:
+                # tới bước có lệnh kết thúc tiếp theo: các bước ở giữa vị trí và xăng không
+                # đổi, không thu thêm (kho trong ngày chỉ giảm, đã xét ở bước t) và không nạp
+                # thêm, chỉ cộng lượt dừng. Kết quả giống hệt mô phỏng từng bước (18/11/2026)
+                nxt = min(p[0] for p in pending if p is not None)
+                gap = nxt - t - 1
+                if gap > 0:
+                    for i in everyone:
+                        c = pos[i]
+                        stay[c] = stay.get(c, 0) + gap
+                    t = nxt
+                    continue
+        t += 1
 
     # thừa lệnh cũng là sai định dạng ngày
     for i in range(n):
