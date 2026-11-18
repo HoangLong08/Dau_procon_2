@@ -163,3 +163,56 @@ class ObjectiveTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def mlp_model(seed=0, hidden=(5, 3)) -> dict:
+    import random
+    rng = random.Random(seed)
+    n = len(FEATURE_NAMES)
+    sizes = [n, *hidden, 1]
+    layers = [{"W": [[rng.uniform(-1, 1) for _ in range(b)] for _ in range(a)],
+               "b": [rng.uniform(-0.5, 0.5) for _ in range(b)]} for a, b in zip(sizes, sizes[1:])]
+    return {"features": FEATURE_NAMES, "kind": "mlp", "mode": "phan_du", "don_vi": "phan",
+            "mean": [rng.uniform(-1, 1) for _ in range(n)], "scale": [rng.uniform(0.5, 2) for _ in range(n)],
+            "layers": layers, "y_mean": 3.0, "y_scale": 2.0}
+
+
+class MlpModelTest(unittest.TestCase):
+    """V-VN (18/11/2026): mạng nơ-ron chạy thuần Python phải ra đúng như tính bằng numpy."""
+
+    def test_forward_matches_numpy(self):
+        import numpy as np
+        data = mlp_model(seed=3)
+        m = ValueModel(data)
+        self.assertEqual(m.unit, "phan")
+        self.assertTrue(m.residual)
+        rng = np.random.default_rng(1)
+        for _ in range(20):
+            x = rng.normal(size=len(FEATURE_NAMES))
+            h = (x - np.array(data["mean"])) / np.array(data["scale"])
+            for k, layer in enumerate(data["layers"]):
+                h = h @ np.array(layer["W"]) + np.array(layer["b"])
+                if k < len(data["layers"]) - 1:
+                    h = np.maximum(h, 0.0)
+            self.assertAlmostEqual(m.predict(list(x)), 3.0 + 2.0 * float(h[0]), places=9)
+
+    def test_rejects_wrong_input_size(self):
+        data = mlp_model()
+        data["mean"] = data["mean"][:-1]
+        with self.assertRaises(ValueError):
+            ValueModel(data)
+
+    def test_vn_model_used_only_on_safe_days_in_serving_units(self):
+        ctx, dec = sample_states(days=(1,))[0]
+        m = ValueModel(mlp_model(seed=5))
+        x = features(ctx, dec.result)
+        base_w = Weights(value_weight=0.0)
+        base = end_value(dataclasses.replace(ctx, weights=base_w), dec.result)
+        with mock.patch.object(objective, "default_model_vn", return_value=m):
+            on = end_value(dataclasses.replace(ctx, weights=Weights(value_weight=0.0, value_q_weight=0.5)),
+                           dec.result)
+            off_day = end_value(dataclasses.replace(ctx, weights=Weights(value_weight=0.0, value_q_weight=0.5,
+                                                                           soft_unit=0.0)), dec.result)
+        self.assertAlmostEqual(on, base + 0.5 * Weights().serving * m.predict(x), places=6)
+        base0 = end_value(dataclasses.replace(ctx, weights=Weights(value_weight=0.0, soft_unit=0.0)), dec.result)
+        self.assertAlmostEqual(off_day, base0, places=6, msg="ngày chưa an toàn (soft_unit = 0): không dùng V-VN")

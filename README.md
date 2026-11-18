@@ -345,6 +345,13 @@ chạm trần mọi ngày, nên số phần Q quyết định. Ta thua DAU 2 37�
 - Có code nhưng để tắt, vì đo không thấy lợi: tìm kiếm cục bộ ủ mô phỏng
   (`planner/local.py`, `ls_share`) và kẹp phần mềm (`soft_cap`).
 
+**Tăng tốc ALNS (từ 19/11/2026), bài ra giống hệt:**
+- Bảng spot gần nhất dựng một lần cho mỗi ngữ cảnh ngày (`construct.neighbours`). Trước đây bảng bị dựng lại sau mỗi vòng.
+- `InsertionState` lưu sẵn ô của từng tour.
+- Bộ mô phỏng, khi không ghi vết, nhảy thẳng tới bước có lệnh kết thúc tiếp theo.
+- Trên bản đồ VN, số vòng mỗi giây tăng 1,3–1,45 lần: 224 → 325, 299 → 394, 419 → 539.
+- `tests/test_speed_golden.py` giữ đúng từng bài như trước khi tăng tốc. Nếu cố ý đổi hành vi của planner thì chụp lại bằng `python -m tests.test_speed_golden --tao`.
+
 ### Cách chia thời gian trong một ngày
 
 Bot gửi **bài an toàn** trong khoảng 10 ms sau khi nhận trạng thái, rồi tiếp tục

@@ -207,7 +207,14 @@ def hard_terms(ctx: DayContext, result, w: Weights, state: Optional[_EndState] =
 
 
 class ValueModel:
-    """Cây tăng cường (scikit-learn GradientBoostingRegressor) ở dạng mảng, chạy thuần Python."""
+    """Mô hình giá trị chạy thuần Python, đọc từ JSON. Ba loại (`kind`):
+
+      "tuyen_tinh": V = init + Σ hệ số × đặc trưng;
+      "cay":        cây tăng cường (scikit-learn GradientBoostingRegressor) ở dạng mảng;
+      "mlp":        mạng nơ-ron truyền thẳng (scikit-learn MLPRegressor, ReLU): chuẩn hoá đầu
+                    vào (x − mean) / scale, các lớp ẩn ReLU, lớp ra tuyến tính, rồi
+                    y_mean + y_scale × đầu ra (18/11/2026, hàm giá trị V-VN).
+    """
 
     def __init__(self, data: dict):
         names = list(data["features"])
@@ -215,19 +222,37 @@ class ValueModel:
             raise ValueError("đặc trưng của mô hình không khớp FEATURE_NAMES")
         self.kind = data.get("kind", "cay")
         self.residual = data.get("mode", "thay") == "phan_du"
+        self.layers = None
         if self.kind == "tuyen_tinh":
             self.coef = [float(c) for c in data["coef"]]
             if len(self.coef) != len(names):
                 raise ValueError("số hệ số không khớp số đặc trưng")
             self.init = float(data.get("init", 0.0))
             self.trees = []
+        elif self.kind == "mlp":
+            self.coef = None
+            self.trees = []
+            self.init = 0.0
+            self.mean = [float(v) for v in data["mean"]]
+            self.scale = [float(v) if v else 1.0 for v in data["scale"]]
+            if len(self.mean) != len(names) or len(self.scale) != len(names):
+                raise ValueError("chuẩn hoá của mô hình không khớp số đặc trưng")
+            #: [(W theo hàng là nơ-ron vào: W[i][j], b[j])]
+            self.layers = [([[float(v) for v in row] for row in layer["W"]], [float(v) for v in layer["b"]])
+                           for layer in data["layers"]]
+            if len(self.layers[0][0]) != len(names):
+                raise ValueError("lớp vào của mạng không khớp số đặc trưng")
+            self.y_mean = float(data.get("y_mean", 0.0))
+            self.y_scale = float(data.get("y_scale", 1.0))
         else:
             self.coef = None
             self.init = float(data["init"])
             self.rate = float(data["learning_rate"])
             self.trees = [(t["f"], t["t"], t["l"], t["r"], [self.rate * v for v in t["v"]])
                           for t in data["trees"]]
-        self.meta = {k: v for k, v in data.items() if k not in ("trees", "coef")}
+        self.meta = {k: v for k, v in data.items() if k not in ("trees", "coef", "layers")}
+        #: "phan": đầu ra tính theo số phần (V-VN), nhân Weights.serving; mặc định theo đơn vị mềm
+        self.unit = data.get("don_vi", "")
 
     @staticmethod
     def load(path: str = MODEL_PATH) -> "ValueModel":
@@ -235,6 +260,18 @@ class ValueModel:
             return ValueModel(json.load(fh))
 
     def predict(self, x: Sequence[float]) -> float:
+        if self.layers is not None:
+            h = [(v - m) / s for v, m, s in zip(x, self.mean, self.scale)]
+            last = len(self.layers) - 1
+            for k, (W, b) in enumerate(self.layers):
+                out = list(b)
+                for i, hi in enumerate(h):
+                    if hi:
+                        row = W[i]
+                        for j in range(len(out)):
+                            out[j] += hi * row[j]
+                h = out if k == last else [v if v > 0.0 else 0.0 for v in out]
+            return self.y_mean + self.y_scale * h[0]
         if self.coef is not None:
             return self.init + sum(c * v for c, v in zip(self.coef, x))
         total = self.init
@@ -259,6 +296,24 @@ def default_model() -> Optional[ValueModel]:
         except (OSError, ValueError, KeyError):
             _CACHE[path] = None
     return _CACHE[path]
+
+
+#: V-VN (18/11/2026): mô hình học SỐ PHẦN tương lai trên bản đồ kiểu server VN, dùng ở ngày
+#: D an toàn (soft_unit > 0) với trọng số Weights.value_q_weight
+MODEL_VN_PATH = os.path.join(os.path.dirname(__file__), "value_model_vn.json")
+ENV_MODEL_VN = "HEXUDON_VALUE_MODEL_VN"
+
+
+def default_model_vn() -> Optional[ValueModel]:
+    """Mô hình V-VN: file trong HEXUDON_VALUE_MODEL_VN nếu có, không thì value_model_vn.json."""
+    path = os.environ.get(ENV_MODEL_VN) or MODEL_VN_PATH
+    key = "vn:" + path
+    if key not in _CACHE:
+        try:
+            _CACHE[key] = ValueModel.load(path)
+        except (OSError, ValueError, KeyError):
+            _CACHE[key] = None
+    return _CACHE[key]
 
 
 def learned_parts(ctx: DayContext, result, w: Weights, model: ValueModel):

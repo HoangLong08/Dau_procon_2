@@ -5,7 +5,7 @@ from typing import Dict, List, Sequence
 from .. import rules
 from ..simulator import DayResult
 from .solution import DayContext
-from .value import default_model, features, learned_parts
+from .value import default_model, default_model_vn, features, learned_parts
 
 INF = float("inf")
 #: R1: chuỗi chưa thu mà xe gần nhất cuối ngày đã xa hơn tỉ lệ này của số bước còn lại
@@ -33,16 +33,26 @@ def end_value(ctx: DayContext, result: DayResult) -> float:
         return 0.0
     w = ctx.weights
     hard, soft = None, None
-    if w.value_weight > 0:
+    x = None
+    # V-VN (18/11/2026): ở ngày D an toàn (soft_unit > 0), cộng value_q_weight × V_vn theo SỐ PHẦN;
+    # value_q_replace > 0 thì bỏ V1 (học D + Q/B trên bản đồ kiểu Nhật) ở những ngày đó
+    vn = default_model_vn() if (w.value_q_weight > 0 and w.soft_unit > 0) else None
+    if w.value_weight > 0 and not (vn is not None and w.value_q_replace > 0):
         model = default_model()
         if model is not None:
             if model.residual:
                 hard, soft = _hand_parts(ctx, result)
-                soft += w.value_weight * w.soft * model.predict(features(ctx, result))
+                x = features(ctx, result)
+                soft += w.value_weight * w.soft * model.predict(x)
             else:
                 hard, soft = learned_parts(ctx, result, w, model)
     if hard is None:
         hard, soft = _hand_parts(ctx, result)
+    if vn is not None:
+        if x is None:
+            x = features(ctx, result)
+        unit = w.serving if vn.unit == "phan" else w.soft
+        soft += w.value_q_weight * unit * vn.predict(x)
     if w.soft_cap > 0:
         # D hôm nay (B mỗi chuỗi) luôn thắng: hai nghiệm chênh nhau về phần mềm tối đa 2·cap·B
         cap = w.soft_cap * w.B

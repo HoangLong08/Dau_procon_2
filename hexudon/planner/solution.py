@@ -143,6 +143,13 @@ class Weights:
     #: Bật từ 18/11: cùng điểm xuất phát với DAU 2, số ngày thiếu D từ 3 về 0
     today_chain_first: float = 1.0
 
+    # --- hàm giá trị V-VN theo số phần (18/11/2026, planner/value_model_vn.json). 0 là như trước ---
+    #: > 0: ở ngày D an toàn (soft_unit > 0), phần mềm cộng value_q_weight × V_vn (số phần tương lai
+    #: dự đoán, so với các nghiệm cùng ngày). Học bằng thi_nghiem_ai/hoc_v_vn.py
+    value_q_weight: float = 0.0
+    #: > 0: ở những ngày dùng V-VN thì bỏ V1 (value_weight), chỉ giữ V-VN
+    value_q_replace: float = 0.0
+
     @property
     def soft(self) -> float:
         """Đơn vị của hạng mục cuối ngày mềm: soft_unit nếu > 0, không thì B (hành vi cũ)."""
