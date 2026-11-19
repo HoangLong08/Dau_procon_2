@@ -242,6 +242,21 @@ def variant_weights(w: Weights) -> List[Weights]:
     return [dataclasses.replace(w, fuel_bonus=w.fuel_bonus * 2), dataclasses.replace(w, **end_x2)]
 
 
+def today_hard_len(ctx: DayContext, results: Sequence = ()) -> int:
+    """Số phần đầu của (chuỗi mới, D, Q) hôm nay mà rollout/chọn seed không được hạ: 1 (chỉ L),
+    hoặc 2 (L và D) ở ngày D an toàn khi bật rollout_d_hard. Với rollout_d_streak > 0 thì còn
+    cần một bài trong `results` đạt trần D hôm nay (đủ mọi chuỗi của bản đồ); phần "mọi ngày
+    trước đều đạt trần" do strategist kiểm (MatchStrategist.day_weights)."""
+    w = ctx.weights
+    if w.rollout_d_hard <= 0 or w.soft_unit <= 0:
+        return 1
+    if w.rollout_d_streak > 0:
+        n = len(ctx.config.brands)
+        if not any(r.ok and lexicographic_gain(ctx, r)[1] >= n for r in results):
+            return 1
+    return 2
+
+
 def pick_by_lookahead(ctx: DayContext, best_sol: DaySolution, best_dec: Decoded, elite: Optional[Elite],
                       lookahead: Callable[[Decoded], Tuple[int, int, int]],
                       deadline: Optional[float] = None,
@@ -249,16 +264,18 @@ def pick_by_lookahead(ctx: DayContext, best_sol: DaySolution, best_dec: Decoded,
     """R4: trong nghiệm tốt nhất và các nghiệm của `elite`, chọn nghiệm có (chuỗi mới, D, Q)
     của hôm nay cộng `lookahead` (các ngày sau) lớn nhất; hoà thì theo điểm.
 
-    Không nhận nghiệm có ít chuỗi mới hôm nay hơn nghiệm tốt nhất (L cứng, R1). Hết giờ
-    giữa chừng thì chọn trong số đã chấm. Trả thêm "rollout" nếu đổi khỏi nghiệm tốt nhất,
-    và info = {"worst": giây của lần chơi tiếp chậm nhất, "total": tổng của bài được chọn}.
+    Không nhận nghiệm có ít chuỗi mới hôm nay hơn nghiệm tốt nhất (L cứng, R1); ở ngày D an
+    toàn với rollout_d_hard thì cả D cũng vậy. Hết giờ giữa chừng thì chọn trong số đã chấm.
+    Trả thêm "rollout" nếu đổi khỏi nghiệm tốt nhất, và info = {"worst": giây của lần chơi
+    tiếp chậm nhất, "total": tổng của bài được chọn}.
     """
-    base_new = lexicographic_gain(ctx, best_dec.result)[0]
+    hard = today_hard_len(ctx, [best_dec.result])
+    base = lexicographic_gain(ctx, best_dec.result)[:hard]
     cands = [(best_sol, best_dec)]
     seen = {tuple(tuple(seq) for seq in best_dec.plan)}
     pool = list(extra) + (elite.entries() if elite is not None else [])
     for sol, dec in pool:
-        if not dec.result.ok or lexicographic_gain(ctx, dec.result)[0] < base_new:
+        if not dec.result.ok or lexicographic_gain(ctx, dec.result)[:hard] < base:
             continue
         key = tuple(tuple(seq) for seq in dec.plan)
         if key in seen:
@@ -284,6 +301,39 @@ def pick_by_lookahead(ctx: DayContext, best_sol: DaySolution, best_dec: Decoded,
     if neg_idx == 0:
         return best_sol, best_dec, "", info
     return sol, dec, "rollout", info
+
+
+def orienteering_start(ctx: DayContext, sol: DaySolution, decoded: Decoded, deadline: Optional[float],
+                       better: Callable[[DaySolution, Decoded], None]) -> Tuple[DaySolution, Decoded]:
+    """Bước E: tour orienteering tối ưu của từng xe (MILP), giải mã và vá L/D; trả nó nếu hơn bài
+    đang có theo score_day, không thì giữ nguyên."""
+    from .orienteering import exact_tours
+
+    w = ctx.weights
+    secs = w.or_seconds
+    if deadline is not None:
+        span = max(0.0, deadline - time.monotonic())
+        if span < w.or_min_seconds:   # ngày ngắn: ALNS dùng trọn ngân sách thì hơn
+            return sol, decoded
+        secs = min(secs, w.or_share * span)
+    if secs <= 0.05:
+        return sol, decoded
+    seed_sol = exact_tours(ctx, secs, k_near=int(w.or_k_near), cap_fuel=w.or_fuel > 0, base=sol)
+    if seed_sol is None:
+        return sol, decoded
+    if w.or_fuel > 0:
+        dec = decode(ctx, seed_sol)
+    else:
+        from .orienteering import add_meets
+        seed_sol, dec = add_meets(ctx, seed_sol, deadline)
+    if not dec.result.ok:
+        return sol, decoded
+    seed_sol, dec = ensure_new_chains(ctx, seed_sol, dec)
+    seed_sol, dec = ensure_today_chains(ctx, seed_sol, dec, deadline=deadline)
+    if dec.score > decoded.score:
+        better(seed_sol, dec)
+        return seed_sol, dec
+    return sol, decoded
 
 
 def plan_day(
@@ -344,6 +394,8 @@ def plan_day(
         if patched is not first:
             start_sol, start_dec = patched_sol, patched
             better(start_sol, start_dec)
+    if w.or_seconds > 0:
+        start_sol, start_dec = orienteering_start(ctx, start_sol, start_dec, deadline, better)
     # R3: ngày cuối end_value = 0, nên đạt cận trên của hôm nay là xong: dừng ngay để bài
     # cuối được gửi sớm (thời gian phản hồi là tiêu chí 4). Ngày khác vẫn tìm tiếp, vì
     # trạng thái cuối ngày còn cải thiện được và D, Q các ngày sau xếp trên thời gian.

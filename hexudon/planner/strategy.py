@@ -11,7 +11,7 @@ from ..model import AgentState, DayState, MatchConfig
 from ..simulator import run_day, wait_plan
 from ..traffic import ForecastCalibrator, TrafficForecast, counts_from_positions, parked_stay
 from .decoder import Decoded
-from .engine import day_upper_bound, make_context, plan_day
+from .engine import day_upper_bound, make_context, plan_day, today_hard_len
 from .objective import lexicographic_gain
 from .parallel import DayJob, SeedPool, run_job, total_of
 from .roles import select_roles
@@ -144,6 +144,9 @@ class MatchStrategist:
         role_weights = self.weights
         if role_weights.soft_auto > 0 and role_weights.soft_unit > 0:
             role_weights = dataclasses.replace(role_weights, soft_unit=0.0)
+        if role_weights.or_seconds > 0:
+            # Bước E: chơi thử hàng chục trận, MILP từng ngày quá chậm cho việc đó
+            role_weights = dataclasses.replace(role_weights, or_seconds=0.0)
         kinds, options = select_roles(
             self.config, budget_seconds=budget, weights=role_weights, seed=self.seed, log=self.log, **extra
         )
@@ -327,9 +330,13 @@ class MatchStrategist:
         handles = None
         main_deadline = deadline
         if extra_seeds:
+            # Bước E: chỉ seed chính giải MILP từng xe (4 luồng); seed phụ giữ ALNS thuần cho đa
+            # dạng và để không tranh lõi với HiGHS
+            extra_weights = (dataclasses.replace(day_weights, or_seconds=0.0)
+                             if day_weights.or_seconds > 0 else day_weights)
             base_job = DayJob(
                 day=state.day, kinds=list(self.kinds), agents=agents, status=status,
-                visited=set(self.visited_brands), weights=day_weights, forecast_status=forecast_status,
+                visited=set(self.visited_brands), weights=extra_weights, forecast_status=forecast_status,
                 steps_override=steps_override, seed=self.seed, max_iterations=max_iterations,
                 forecast=self.forecast if look is not None else None,
                 status_yesterday=self.status_yesterday, stay_yesterday=self.own_stay_yesterday,
@@ -403,12 +410,14 @@ class MatchStrategist:
                    handles, deadline: Optional[float], max_iterations: int) -> Decoded:
         """R7: chọn giữa bài của seed chính và các seed phụ theo (chuỗi mới, D, Q) của hôm nay
         cộng phần chơi tiếp các ngày sau; hoà thì theo điểm. Không nhận bài ít chuỗi mới hơn
-        hôm nay (L cứng, như R4). Bài của seed phụ thắng thì mang picked_by = "song_song".
+        hôm nay (L cứng, như R4); ở ngày D an toàn với rollout_d_hard thì không nhận bài có
+        (chuỗi mới, D) kém seed tốt nhất. Bài của seed phụ thắng thì mang picked_by = "song_song".
 
         Ngày cuối không có phần chơi tiếp: bài đã đạt cận trên của hôm nay không thể bị vượt,
         nên trả ngay thay vì chờ seed phụ tới hạn. Nhờ vậy dừng sớm của R3 vẫn rút được thời
         gian phản hồi (tiêu chí 4), quyết định ở ca kho = 1."""
-        if ctx.days_left == 0 and best.result.ok and                 lexicographic_gain(ctx, best.result) == day_upper_bound(ctx):
+        if (ctx.days_left == 0 and best.result.ok
+                and lexicographic_gain(ctx, best.result) == day_upper_bound(ctx)):
             return best
         if handles is not None:
             until = deadline if deadline is not None else time.monotonic()
@@ -416,24 +425,35 @@ class MatchStrategist:
         else:                       # theo vòng: tuần tự, tất định
             results = [run_job(self.config, dataclasses.replace(base_job, seed=sd, max_iterations=max_iterations))
                        for sd in extra_seeds]
-        base_new = lexicographic_gain(ctx, best.result)[0]
-        if best.total is None and look is not None and handles is not None and deadline is not None \
-                and time.monotonic() + self._roll_estimate(base_job.horizon) > deadline:
+        hard = today_hard_len(ctx, [best.result] + [res[0].result for res in results if res is not None])
+        own = lexicographic_gain(ctx, best.result)[:hard]
+        base = own
+        if hard > 1:
+            # ngày D an toàn: sàn là (chuỗi mới, D) lớn nhất trong mọi seed, kể cả seed phụ
+            for res in results:
+                if res is not None and res[0].result.ok:
+                    base = max(base, lexicographic_gain(ctx, res[0].result)[:hard])
+        main_ok = own >= base
+        no_time = (deadline is not None
+                   and time.monotonic() + self._roll_estimate(base_job.horizon) > deadline)
+        if main_ok and best.total is None and look is not None and handles is not None and no_time:
             self.log(f"ngày {ctx.day + 1}: không kịp chấm bài của seed chính, giữ bài đó")
             return best
-        t0 = time.monotonic()
-        own_total = total_of(ctx, best, look)
-        if best.total is None and look is not None:
-            self._note_roll(time.monotonic() - t0)
-        cands = [(own_total, best.score, 0, best)]
+        cands = []
+        if main_ok:
+            t0 = time.monotonic()
+            own_total = total_of(ctx, best, look)
+            if best.total is None and look is not None:
+                self._note_roll(time.monotonic() - t0)
+            cands.append((own_total, best.score, 0, best))
         for k, res in enumerate(results, 1):
             if res is None:
                 continue
             dec, total = res
-            if not dec.result.ok or lexicographic_gain(ctx, dec.result)[0] < base_new:
+            if not dec.result.ok or lexicographic_gain(ctx, dec.result)[:hard] < base:
                 continue
             cands.append((tuple(total), dec.score, -k, dec))
-        done = len(cands) - 1
+        done = len(cands) - (1 if main_ok else 0)
         _, _, neg_k, pick = max(cands, key=lambda c: (c[0], c[1], c[2]))
         if neg_k != 0:
             pick.picked_by = "song_song"
@@ -463,11 +483,19 @@ class MatchStrategist:
         soft_auto > 0 (cùng soft_unit > 0): hạng mục cuối ngày mềm chỉ tính theo soft_unit khi
         D đã an toàn, tức đã đủ L (mọi chuỗi đã thu trong trận) và ngày hôm trước đạt trần D;
         ngày khác (ngày 0, hoặc vừa hụt chuỗi) dùng B như cũ để giữ D.
+
+        rollout_d_streak > 0: luật D cứng của rollout (rollout_d_hard) chỉ giữ khi đã chơi ít
+        nhất ngần ấy ngày và ngày nào cũng đạt trần D; không thì tắt cho ngày này.
         """
         w = self.weights
+        n = len(self.config.brands)
+        if w.rollout_d_hard > 0 and w.rollout_d_streak > 0:
+            easy = (len(self.history) >= w.rollout_d_streak
+                    and all(h.get("types", 0) >= n for h in self.history))
+            if not easy:
+                w = dataclasses.replace(w, rollout_d_hard=0.0)
         if w.soft_unit <= 0 or w.soft_auto <= 0:
             return w
-        n = len(self.config.brands)
         safe = (len(self.visited_brands) >= n and bool(self.history)
                 and self.history[-1].get("types", 0) >= n)
         return w if safe else dataclasses.replace(w, soft_unit=0.0)

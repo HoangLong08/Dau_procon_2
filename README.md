@@ -169,7 +169,8 @@ Lệnh `play` và `sandbox` (server kiểu PTIT):
 | `--seed` | `0` | cùng seed + cùng đầu vào ⇒ cùng kế hoạch, để tái hiện khi gỡ lỗi |
 
 **Quy tắc đặt `--search-seconds` cho `play`**: bằng hạn mỗi ngày của ban tổ chức trừ
-khoảng 2 giây. Hạn 5 s → để mặc định 3.0. Hạn 60 s → đặt 58.
+khoảng 2 giây. Hạn 5 s → để mặc định 3.0. Hạn 60 s → đặt 58. Bước MILP orienteering chỉ
+chạy khi ngày có từ 10 s trở lên (`or_min_seconds`); ngắn hơn thì bot chỉ dùng ALNS như cũ.
 
 **Đừng tự tăng `--role-seconds`.** Nó tự rút lại theo `startsAt` của server, hoặc
 theo độ dài ngày 0 nếu server không báo giờ mở. Đây là bảo hiểm cho một lỗi đã đo
@@ -366,6 +367,23 @@ chạm trần mọi ngày, nên số phần Q quyết định. Ta thua DAU 2 37�
   - Sảnh 10 đội kiểu Nhật: ΔD +0,16, không mất L.
 - `value_q_weight = 0` tái hiện đúng hành vi 18/11. Biến thể đó là `mac_dinh_18_11` trong `thi_nghiem_ai/doi_chieu_dau2.py`.
 - Học lại: `thi_nghiem_ai/du_lieu_v_vn.py`, rồi `hoc_v_vn.py --goc hom_nay --xuat --loai cay --h 2 --K 0`.
+
+**Orienteering chính xác bằng MILP, và luật D cứng của rollout (bật từ 19/11/2026):**
+- Mỗi xe chỉ thu một phần ở mỗi spot mỗi ngày, và trên bản đồ kiểu VN kho mỗi spot ≥ số xe tuần tra. Vì vậy bài trong ngày tách thành một bài orienteering cho mỗi xe: ghé nhiều spot nhất trong số bước của ngày.
+- `planner/orienteering.py` giải từng xe bằng MILP (scipy `milp` / HiGHS, mỗi xe một luồng), rồi giải mã, thêm điểm hẹn xe tiếp xăng và vá L/D. ALNS xuất phát từ bài này nếu nó tốt hơn theo `score_day`.
+  - Từ đúng trạng thái của DAU 2, lời giải tối ưu bằng đúng số phần DAU 2 đạt ở 5/6 ngày thử.
+  - Núm: `or_seconds` 20, `or_share` 0,75, `or_k_near` 10, `or_fuel` 0.
+  - Theo giây, ngày còn dưới `or_min_seconds` (10 s) thì bỏ MILP: ở 3–5 s/ngày MILP làm thiệt (−47, −31 Q trên 4 trận), từ 15 s thì có lợi (+28; 30 s +61).
+  - Chọn vai trò và các seed phụ của R7 tắt MILP.
+  - Không có scipy thì bot bỏ qua bước này và chạy như trước.
+- **Luật D cứng của rollout** (`rollout_d_hard` 1, `rollout_d_streak` 2):
+  - Khi đã chơi ít nhất 2 ngày, ngày nào cũng đạt trần D, và có bài hôm nay đạt trần, rollout R4 và chọn seed R7 không được đổi D hôm nay lấy D dự báo của các ngày sau.
+  - Trên bản đồ VN, những lần đổi như vậy là nhiễu của lượt chơi tiếp, và từng làm mất 1 D (chuỗi 20 → 19).
+  - Trên bản đồ thiếu D (bản đồ mẫu), đổi như vậy là đúng. Bản áp dụng ở mọi ngày an toàn từng làm mất 0,5 D mỗi trận ở đó, nên luật chỉ áp khi D "dễ".
+- **Kết quả đo:**
+  - Cả trận, 4 bản đồ contest và 12 bản đồ sinh, 3 seed: Q +16,5 ± 2,6 mỗi trận (contest +21,4), thắng Q 43/48 cặp, tổng D +1.
+  - Sảnh 10 đội kiểu Nhật: ΔD +0,36 trên 75 cặp không phải VN, không mất L. Bản đồ mẫu (48 cặp): ΔD +0,29.
+- Biến thể `mac_dinh_19_11` trong `thi_nghiem_ai/doi_chieu_dau2.py` (và `TRUOC_E`) tái hiện hành vi trước đó.
 
 ### Cách chia thời gian trong một ngày
 

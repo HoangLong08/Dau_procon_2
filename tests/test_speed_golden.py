@@ -18,16 +18,19 @@ from hexudon.offline.mapgen import generate, load_or_generate
 from hexudon.planner.engine import make_context, plan_day, safe_solution
 from hexudon.planner.objective import lexicographic_gain
 from hexudon.planner.roles import candidates
+from hexudon.planner.solution import Weights
 
 FIX = os.path.join(os.path.dirname(__file__), "fixtures")
 GOLDEN = os.path.join(FIX, "golden_plans.json")
+#: bài vàng kiểm phần ALNS: MILP orienteering (Bước E, theo giây nên không tất định) để tắt
+W = Weights(or_seconds=0.0)
 
 
 def _ctx_sample16():
     cfg = load_or_generate("sample_16")
     kinds = candidates(cfg)[1].kinds
     agents = [AgentState(kinds[i], cfg.agent_starts[i], cfg.fuel_limits) for i in range(cfg.n_agents)]
-    return make_context(cfg, 0, agents, {}, [s.stocks for s in cfg.spots], set())
+    return make_context(cfg, 0, agents, {}, [s.stocks for s in cfg.spots], set(), weights=W)
 
 
 def _ctx_vn():
@@ -35,7 +38,7 @@ def _ctx_vn():
         d = json.load(fh)
     cfg = MatchConfig.from_json(d["config"])
     agents = [AgentState(d["kinds"][i], c, f) for i, (c, f) in enumerate(d["dau"])]
-    return make_context(cfg, d["day"], agents, {}, [s.stocks for s in cfg.spots], set(cfg.brands))
+    return make_context(cfg, d["day"], agents, {}, [s.stocks for s in cfg.spots], set(cfg.brands), weights=W)
 
 
 def _ctx_mapgen():
@@ -43,7 +46,7 @@ def _ctx_mapgen():
     kinds = [rules.PATROL] * 3 + [rules.REFUEL] * 2
     agents = [AgentState(kinds[i], cfg.agent_starts[i], cfg.fuel_limits // 2 if kinds[i] == rules.PATROL else 0)
               for i in range(cfg.n_agents)]
-    return make_context(cfg, 1, agents, {}, [s.stocks for s in cfg.spots], set(cfg.brands[:3]))
+    return make_context(cfg, 1, agents, {}, [s.stocks for s in cfg.spots], set(cfg.brands[:3]), weights=W)
 
 
 CASES = [("sample16", _ctx_sample16, 0, 120), ("vn_1addebd7", _ctx_vn, 1, 80), ("mapgen21", _ctx_mapgen, 2, 120)]

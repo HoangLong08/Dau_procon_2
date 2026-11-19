@@ -87,6 +87,16 @@ class Weights:
     rollout_share: float = 0.2
     #: số ngày chơi tiếp khi chấm một ứng viên; 0 = tới hết trận
     rollout_days: float = 3.0
+    #: 1 = ở ngày D an toàn (soft_unit > 0), rollout (R4) và chọn seed (R7) không nhận bài có ít
+    #: (chuỗi mới, D) hôm nay hơn bài tốt nhất theo điểm: D hôm nay chắc chắn, còn D các ngày sau
+    #: do chơi tiếp dự báo thì nhiễu (19/11: 1addebd7 bỏ D 20 lấy D 19 và −10 phần). 0 = như cũ.
+    #: Bật từ 19/11 cùng rollout_d_streak 2 và MILP orienteering (báo cáo mục 4.13)
+    rollout_d_hard: float = 1.0
+    #: > 0 (cùng rollout_d_hard): chỉ giữ D cứng khi D "dễ": đã chơi ít nhất ngần này ngày, ngày
+    #: nào cũng đạt trần D (đủ mọi chuỗi), và có bài hôm nay đạt trần. Ở đó dự báo "bài tốt nhất
+    #: sẽ hụt D về sau" là nhiễu của rollout. Còn trên bản đồ thiếu D (bản đồ mẫu, 19/11), đổi 1 D
+    #: hôm nay lấy D ngày sau thường là thật: bản rộng (0) ΔD −0,50 trên 48 cặp, bản 2 ngày +0,29
+    rollout_d_streak: float = 2.0
     #: R3: 1 = ngày cuối, đạt cận trên (chuỗi mới, D, Q) của hôm nay thì dừng tìm và gửi ngay
     ub_stop: float = 1.0
     # --- giao thông (R5, R6). 0 là hành vi trước đó ---
@@ -155,6 +165,22 @@ class Weights:
     #: > 0: với mô hình V-VN "thay_ev" vẫn giữ hạng mục V_near (chuỗi với tới nửa ngày mai) nhân
     #: hệ số này, vì mô hình chỉ học số phần còn D ngày mai cần V_near (19/11/2026)
     value_q_keep_near: float = 1.0
+
+    # --- Bước E (19/11/2026): orienteering chính xác cho từng xe (planner/orienteering.py) ---
+    #: > 0: mỗi ngày dành tối đa ngần này giây giải MILP từng xe tuần tra, làm điểm xuất phát
+    #: của ALNS nếu tốt hơn (theo vòng: đúng ngần này giây; theo giây: thêm trần or_share).
+    #: Bật từ 19/11 (or_seconds 20, or_share 0,75, or_k_near 10, or_fuel 0): cả trận 48 cặp VN
+    #: +16,5 Q/trận, ΔD +1; sảnh 10 đội ΔD +0,36 trên 75 cặp không phải VN. 0 = như trước
+    or_seconds: float = 20.0
+    #: theo giây: phần tối đa của ngân sách ngày cho bước orienteering
+    or_share: float = 0.75
+    #: > 0: mỗi nút chỉ nối tới ngần này spot gần nhất (nhanh hơn, có thể mất tối ưu)
+    or_k_near: float = 10.0
+    #: 1: chặn tổng xăng của tour theo xăng hiện có; 0: bỏ (ALNS và bộ giải mã lo điểm hẹn)
+    or_fuel: float = 0.0
+    #: theo giây: bỏ bước orienteering khi ngày còn ít hơn ngần này giây. Cùng điểm xuất phát với
+    #: DAU 2 (19/11), MILP thiệt ở 3 và 5 s/ngày (−47, −31 Q), hoà ở 10 s, lợi từ 15 s (+28; 30 s +61)
+    or_min_seconds: float = 10.0
 
     @property
     def soft(self) -> float:
