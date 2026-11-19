@@ -170,6 +170,125 @@ def _covered(ctx: DayContext, tours: Sequence[Sequence[int]]) -> set:
     return got
 
 
+def _reach_brands(ctx: DayContext, slot: int) -> set:
+    """Các chuỗi xe tuần tra `slot` tới được một spot (còn kho) trong ngày."""
+    start = ctx.agents[ctx.patrols[slot]].pos
+    return {ctx.spot_brand[k] for k, c in enumerate(ctx.spot_cells)
+            if ctx.stocks[k] > 0 and ctx.dist_step.cost(start, c) <= ctx.steps}
+
+
+#: thiếu tối đa ngần này chuỗi thì thử mọi cách giao chuỗi cho xe; nhiều hơn thì giao tham lam
+EXHAUSTIVE_MISSING = 2
+
+
+def assign_missing(ctx: DayContext, tours: Sequence[Sequence[int]], fixed: Sequence[bool], seconds: float,
+                   k_near: int = 0, cap_fuel: bool = False) -> Optional[List[List[int]]]:
+    """Bước phủ chuỗi (20/11/2026): từ tour tối đa số spot của từng xe (có thể thiếu chuỗi), giao
+    các chuỗi thiếu cho các xe và giải lại.
+
+    Xe v được giải lại với ràng buộc giữ các chuỗi chỉ nó phủ, cộng tập chuỗi thiếu được giao;
+    xe `fixed` (đã có điểm hẹn) giữ nguyên tour. Thiếu ≤ EXHAUSTIVE_MISSING chuỗi thì thử mọi cách
+    giao. Nhiều hơn thì giải từng (xe, chuỗi), giao mỗi chuỗi cho xe mất ít spot nhất, giải lại
+    mỗi xe với tập được giao, và so với phương án dồn hết cho một xe. Trả tour phủ mọi chuỗi tới
+    được (nhiều spot nhất), hoặc None.
+
+    Cách cũ (giải lại lần lượt, dừng ở xe đầu tiên phủ được) bỏ lỡ bài đủ chuỗi: contest
+    ca4f5676 ngày 8 (19/11) ta chỉ 19/20 chuỗi, trong khi từ đúng vị trí đó có bài 20 chuỗi 36
+    phần; từ trạng thái DAU 2, cách này ra đúng số phần DAU 2 ở f06e9b26 ngày 5 và ca4f5676 ngày 8.
+    """
+    import itertools
+    from concurrent.futures import ThreadPoolExecutor
+
+    end = time.monotonic() + seconds
+    P = len(tours)
+    brands = set(ctx.config.brands)
+    free = [v for v in range(P) if not fixed[v]]
+    if not free:
+        return None
+    reach = {v: _reach_brands(ctx, v) for v in free}
+    reachable = set().union(*reach.values()) | _covered(ctx, tours)
+    missing = sorted((brands - _covered(ctx, tours)) & reachable)
+    if not missing:
+        return None
+    spot_at = ctx.config.spot_index_at
+    req_base = {}
+    for v in free:
+        own = brands - _covered(ctx, [[] if s == v else tours[s] for s in range(P)])
+        start = ctx.agents[ctx.patrols[v]].pos
+        at_start = {ctx.spot_brand[spot_at[start]]} if start in spot_at else set()
+        req_base[v] = own - set(missing) - at_start   # chuỗi ở ô xuất phát: thu ở bước 1, không cần ép
+    fuel = {v: (ctx.agents[ctx.patrols[v]].fuel if cap_fuel else None) for v in free}
+    cache = {}
+
+    def run(jobs, share):
+        jobs = [j for j in dict.fromkeys(jobs) if j not in cache and j[1] <= reach[j[0]]]
+        left = end - time.monotonic()
+        if not jobs or left <= 0.05:
+            return
+        workers = min(len(jobs), 6)
+        waves = -(-len(jobs) // workers)
+        tl = max(0.05, share * left / waves)
+
+        def one(job):
+            v, S = job
+            return job, solve_patrol(ctx, v, tl, k_near=k_near, fuel_cap=fuel[v], required_brands=req_base[v] | S)
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            cache.update(pool.map(one, jobs))
+
+    def tours_of(S_of):
+        out = []
+        for v in range(P):
+            S = S_of.get(v, frozenset())
+            if not S:
+                out.append(list(tours[v]))
+                continue
+            t = cache.get((v, S))
+            if t is None:
+                return None
+            out.append(t)
+        return out
+
+    assigns = []
+    if len(missing) <= EXHAUSTIVE_MISSING:
+        run([(v, frozenset(c)) for v in free for n in range(1, len(missing) + 1)
+             for c in itertools.combinations(missing, n)], 0.9)
+        for pick in itertools.product(free, repeat=len(missing)):
+            assigns.append({v: frozenset(b for b, w in zip(missing, pick) if w == v) for v in free})
+    else:
+        # nhiều chuỗi thiếu: giao mỗi chuỗi cho xe phải đi vòng ít nhất để chen một spot của nó
+        # vào tour hiện có (ước lượng bằng bảng bước, không cần MILP), rồi giải lại mỗi xe một lần
+        table = ctx.dist_step
+        groups = {v: set() for v in free}
+        for b in missing:
+            def detour(v):
+                if b not in reach[v]:
+                    return (INF, 0)
+                path = [ctx.agents[ctx.patrols[v]].pos] + [ctx.spot_cells[k] for k in tours[v]]
+                best_d = INF
+                for k, c in enumerate(ctx.spot_cells):
+                    if ctx.spot_brand[k] != b or ctx.stocks[k] <= 0:
+                        continue
+                    best_d = min(best_d, table.cost(path[-1], c))
+                    for i in range(len(path) - 1):
+                        best_d = min(best_d, table.cost(path[i], c) + table.cost(c, path[i + 1])
+                                     - table.cost(path[i], path[i + 1]))
+                return (best_d, len(groups[v]))
+            groups[min(free, key=detour)].add(b)
+        greedy = {v: frozenset(g) for v, g in groups.items()}
+        run([(v, S) for v, S in greedy.items() if S], 0.9)
+        assigns.append(greedy)
+    best = None
+    for S_of in assigns:
+        cand = tours_of(S_of)
+        if cand is None or (brands - _covered(ctx, cand)) & reachable:
+            continue
+        total = sum(len(t) for t in cand)
+        if best is None or total > best[0]:
+            best = (total, cand)
+    return best[1] if best else None
+
+
 def exact_tours(ctx: DayContext, seconds: float, k_near: int = 0,
                 cap_fuel: bool = True, base: Optional[DaySolution] = None) -> Optional[DaySolution]:
     """Nghiệm gồm tour orienteering tối ưu của từng xe tuần tra, trong `seconds`.
@@ -177,8 +296,9 @@ def exact_tours(ctx: DayContext, seconds: float, k_near: int = 0,
     Có `base` thì mỗi xe chỉ nhận tour MILP có nhiều spot hơn hẳn tour của nó trong base (ràng
     buộc Σ y ≥ cũ + 1); không tìm được trong giờ thì giữ tour cũ cùng các điểm hẹn của nó. Nghiệm
     tạm của HiGHS lúc hết giờ có khi rất tệ (đo 19/11: 9 spot trong khi tối ưu là 22).
-    Nếu các tour chưa phủ đủ chuỗi, giải lại một xe (xe nhiều spot nhất trước) với ràng buộc
-    phủ các chuỗi thiếu. Trả None nếu không có scipy hoặc không xe nào giải được.
+    Nếu các tour chưa phủ đủ chuỗi, giao các chuỗi thiếu cho các xe (assign_missing); không được
+    thì giải lại lần lượt từng xe với ràng buộc phủ (cách cũ). Trả None nếu không có scipy hoặc
+    không xe nào giải được.
     """
     if not ctx.patrols or not available():
         return None
@@ -187,8 +307,9 @@ def exact_tours(ctx: DayContext, seconds: float, k_near: int = 0,
     end = time.monotonic() + seconds
     P = len(ctx.patrols)
     # mỗi xe một luồng (HiGHS nhả GIL khi giải: 4 xe song song thật, đo 19/11), chừa 20% thời
-    # gian cho bước phủ chuỗi
-    tl = 0.8 * seconds
+    # gian cho bước phủ chuỗi, 35% khi dùng assign_missing; xe giải xong sớm thì phần thừa cũng để
+    # cho bước đó
+    tl = (0.65 if ctx.weights.or_assign > 0 else 0.8) * seconds
 
     def floor(slot: int) -> int:
         return len(base.tours[slot]) + 1 if base is not None else 0
@@ -209,6 +330,11 @@ def exact_tours(ctx: DayContext, seconds: float, k_near: int = 0,
         return None
     missing = set(ctx.config.brands) - _covered(ctx, tours)
     if missing:
+        new = (assign_missing(ctx, tours, kept, end - time.monotonic(), k_near=k_near, cap_fuel=cap_fuel)
+               if ctx.weights.or_assign > 0 else None)
+        if new is not None:
+            return DaySolution(tours=new, meets=meets, waits=waits)
+        # dự phòng (cách cũ): giải lại lần lượt từng xe, xe nhiều spot nhất trước
         order = sorted(range(P), key=lambda s: -len(tours[s]))
         for slot in order:
             left = end - time.monotonic()

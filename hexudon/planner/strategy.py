@@ -496,6 +496,8 @@ class MatchStrategist:
                 w = dataclasses.replace(w, rollout_d_hard=0.0)
         if w.soft_unit <= 0 or w.soft_auto <= 0:
             return w
+        if w.soft_day0 > 0 and not self.history:
+            return w            # ngày 0: hạng mục mềm theo phần, hạng mục cứng giữ L vẫn theo B
         safe = (len(self.visited_brands) >= n and bool(self.history)
                 and self.history[-1].get("types", 0) >= n)
         return w if safe else dataclasses.replace(w, soft_unit=0.0)

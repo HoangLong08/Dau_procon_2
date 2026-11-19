@@ -137,7 +137,7 @@ def _near_chains(ctx: DayContext, patrol_cells) -> int:
     """Số chuỗi xe tuần tra với tới trong nửa ngày mai (hạng mục V_near)."""
     if ctx.next_steps <= 0:
         return 0
-    reach = 0.5 * ctx.next_steps
+    reach = ctx.weights.near_reach * ctx.next_steps
     near = 0
     for brand in ctx.config.brands:
         best = min((_dist_to_brand(ctx, c, brand) for c in patrol_cells), default=INF)

@@ -181,6 +181,19 @@ class Weights:
     #: theo giây: bỏ bước orienteering khi ngày còn ít hơn ngần này giây. Cùng điểm xuất phát với
     #: DAU 2 (19/11), MILP thiệt ở 3 và 5 s/ngày (−47, −31 Q), hoà ở 10 s, lợi từ 15 s (+28; 30 s +61)
     or_min_seconds: float = 10.0
+    #: 1 = tour MILP thiếu chuỗi thì giao các chuỗi thiếu cho các xe (orienteering.assign_missing,
+    #: 20/11); 0 = cách cũ: giải lại lần lượt từng xe, dừng ở xe đầu tiên phủ được (mặc định tới khi đo xong)
+    or_assign: float = 0.0
+
+    # --- số phần trong ngày (20/11/2026, sau 2 contest thua DAU 2 tối 19/11) ---
+    #: V_near đếm chuỗi xe tuần tra với tới trong ngần này phần của ngày mai. 0,5 = như cũ; 1 = chỉ
+    #: thưởng chuỗi với tới được trong cả ngày mai (điều kiện cần cho D mai), nên trên bản đồ dễ D
+    #: hạng mục này gần như hằng số và không kéo bài khỏi số phần tối đa hôm nay
+    near_reach: float = 0.5
+    #: > 0 (cùng soft_auto): ngày 0 cũng tính hạng mục cuối ngày mềm theo soft_unit thay vì B.
+    #: Contest f06e9b26 (19/11): MILP tìm ra 91 phần ngày 0 như DAU 2, nhưng hạng mục mềm theo
+    #: B làm bot gửi bài 86 phần. Hạng mục cứng (L, chuỗi chưa thu, xe kẹt xăng) vẫn theo B
+    soft_day0: float = 0.0
 
     @property
     def soft(self) -> float:
