@@ -15,6 +15,13 @@ from .transport import MatchEnded, SelectionWindow, Transport
 
 WATCHDOG_SECONDS = 1.5
 
+#: lập kế hoạch trước: ngày không có bài lập sẵn dùng ngần này phần ngân sách cho chính nó
+PIPELINE_SPLIT = 0.55
+#: ngày đầu tiên lập trước ngày sau (ngày 0 giữ trọn ngân sách: L thường chốt ở ngày 0)
+PIPELINE_FROM_DAY = 1
+#: còn ít hơn ngần này giây tới hạn của ngày thì không lập trước nữa
+PIPELINE_MIN_SECONDS = 2.0
+
 
 class ReplayWriter:
     def __init__(self, path: Optional[str]):
@@ -54,8 +61,19 @@ class MatchSession:
         replay: Optional[ReplayWriter] = None,
         emit: Optional[Callable[[str, dict], None]] = None,
         search_jobs: Optional[int] = 1,
+        pipeline: bool = False,
     ):
         self.transport = transport
+        #: lập kế hoạch trước (25/11/2026): trong lúc ngày d đang chạy, lập sẵn bài ngày d+1 từ
+        #: trạng thái dự đoán, rồi gửi ngay khi ngày mở; chỉ với ngày có giờ (contest)
+        self.pipeline = pipeline
+        #: ngày không có bài lập sẵn (ngày 1, hoặc trạng thái lệch dự đoán): phần ngân sách cho
+        #: chính ngày đó, phần còn lại để lập trước ngày sau
+        self.pipeline_split = PIPELINE_SPLIT
+        #: còn ít hơn ngần này giây tới hạn của ngày thì không lập trước nữa
+        self.pipeline_min_seconds = PIPELINE_MIN_SECONDS
+        #: tắt cho phần còn lại của trận khi trạng thái thật lệch dự đoán (server có tắc đường)
+        self.pipeline_off = False
         #: R7: số seed ALNS mỗi ngày; None = auto (strategy.resolve_search_jobs)
         self.search_jobs = search_jobs
         self.search_seconds = search_seconds
@@ -108,17 +126,30 @@ class MatchSession:
             # vai trò thật sự dùng: có thể khác vai trò đã chọn khi server không nhận
             self.emit("roles_chosen", {"kinds": list(kinds)})
 
+        pre = None   # (trạng thái dự đoán, bài lập sẵn) của ngày kế tiếp
         while True:
             try:
                 state = self.transport.wait_day_state(kinds)
             except MatchEnded as end:
                 self.log(f"trận kết thúc: {end.args[0] if end.args else ''}")
                 break
+            use = pre if pre is not None and pre[0].day == state.day else None
+            pre = None
+            pipe = self._pipeline_ready(state)
             try:
-                self.play_day(state)
+                if use is not None and not self._same_state(use[0], state):
+                    self.log(f"{self.day_label(state.day)}: trạng thái thật khác dự đoán; "
+                             f"tắt lập kế hoạch trước cho phần còn lại của trận")
+                    self.pipeline_off = True
+                    pipe = False
+                # ngày không có bài lập sẵn: chừa phần cuối ngân sách để lập trước ngày sau
+                scale = self.pipeline_split if pipe and (use is None or self.pipeline_off) else 1.0
+                self.play_day(state, preplanned=use, budget_scale=scale)
             except Exception as exc:
                 # mất một ngày còn hơn mất cả trận: ngày sau vẫn phải được chơi
                 self.log(f"{self.day_label(state.day)}: lỗi không lường trước {exc!r}; bỏ qua ngày này")
+            if pipe and not self.pipeline_off:
+                pre = self._preplan(state)
 
         result = self.transport.get_result()
         if self.strategist is not None:
@@ -164,6 +195,57 @@ class MatchSession:
             self.log("server không nhận vai trò; chuyển sang toàn xe tuần tra như server")
         return kinds
 
+    # ---- lập kế hoạch trước (25/11/2026) ----
+
+    def _pipeline_ready(self, state: DayState) -> bool:
+        """Có lập trước ngày sau không: bật, ngày có giờ và gửi lại được (contest), không phải
+        ngày cuối, và từ ngày 1 (ngày 0 giữ trọn ngân sách vì L, tiêu chí 1, thường chốt ở đó)."""
+        assert self.config is not None
+        return (self.pipeline and not self.pipeline_off and state.ends_at is not None
+                and getattr(self.transport, "supports_resubmit", True)
+                and PIPELINE_FROM_DAY <= state.day < self.config.n_days - 1)
+
+    def _same_state(self, pred: DayState, real: DayState) -> bool:
+        """Trạng thái thật có đúng như dự đoán không: cùng ngày, số bước, vai trò, vị trí, xăng
+        của xe tuần tra, và tình trạng đường (ô vắng mặt coi là thông)."""
+        if pred.day != real.day or self.steps_for(real) != pred.steps or len(pred.agents) != len(real.agents):
+            return False
+        for p, r in zip(pred.agents, real.agents):
+            if p.kind != r.kind or p.pos != r.pos:
+                return False
+            if r.kind == rules.PATROL and r.fuel is not None and p.fuel != r.fuel:
+                return False
+        norm = lambda status: {c: v for c, v in status.items() if v}
+        return norm(pred.road_status) == norm(real.road_status)
+
+    def _preplan(self, state: DayState):
+        """Lập sẵn bài ngày state.day + 1 trong phần còn lại của ngày hiện tại; trả
+        (trạng thái dự đoán, bài) hoặc None."""
+        assert self.strategist is not None and self.config is not None
+        if state.ends_at is None:
+            return None
+        deadline = time.monotonic() + (state.ends_at - time.time()) - self.net_margin
+        if deadline - time.monotonic() < self.pipeline_min_seconds:
+            self.log(f"{self.day_label(state.day + 1)}: không đủ giờ để lập trước")
+            return None
+        steps = self.config.steps_of_day(state.day + 1 + self.day_offset)
+        pred = self.strategist.predict_next(state, steps)
+        if pred is None:
+            return None
+        t0 = time.monotonic()
+        emit, self.strategist.emit = self.strategist.emit, None   # web: không vẽ ngày chưa tới
+        try:
+            decoded = self.strategist.plan_day(pred, deadline=deadline, submit=None, steps_override=steps,
+                                               record=False, observe=False)
+        except Exception as exc:
+            self.log(f"{self.day_label(pred.day)}: lập trước lỗi {exc!r}; ngày đó sẽ lập như thường")
+            return None
+        finally:
+            self.strategist.emit = emit
+        self.log(f"{self.day_label(pred.day)}: đã lập sẵn {len(decoded.result.brands)} loại, "
+                 f"{decoded.result.servings} phần ({time.monotonic() - t0:.1f}s)")
+        return pred, decoded
+
     def day_label(self, day: int) -> str:
         """Số ngày theo cách website hiển thị (từ 1); JSON vẫn giữ chỉ số API từ 0."""
         total = self.config.n_days if self.config is not None else "?"
@@ -195,14 +277,18 @@ class MatchSession:
             self.day_offset = -1
             self.log(f"server có vẻ đánh số ngày từ 1: chuyển sang dùng daySteps[{alt}]")
 
-    def play_day(self, state: DayState) -> Optional[Decoded]:
+    def play_day(self, state: DayState, preplanned=None, budget_scale: float = 1.0) -> Optional[Decoded]:
+        """Chơi một ngày. `preplanned` = (trạng thái dự đoán, bài) lập sẵn từ hôm trước: trạng
+        thái thật đúng như dự đoán thì gửi ngay bài đó và xong ngày; lệch thì gửi ngay nếu nó vẫn
+        hợp lệ, rồi lập kế hoạch như thường và chỉ gửi lại khi hơn nó. `budget_scale` thu ngân
+        sách của ngày (chừa phần sau cho việc lập trước ngày mai)."""
         assert self.strategist is not None and self.config is not None
         started = time.monotonic()
         steps = self.steps_for(state)
         if state.steps and state.steps != self.config.steps_of_day(state.day):
             self.log(f"{self.day_label(state.day)}: server báo {state.steps} bước, daySteps ghi "
                      f"{self.config.steps_of_day(state.day)}; theo server")
-        budget = self.strategist.budget_for(state)
+        budget = self.strategist.budget_for(state) * budget_scale
         deadline = started + budget
         #: hạn cứng của ngày theo đồng hồ đơn điệu; mọi lần gửi phải nằm trong đó
         hard_deadline = None
@@ -239,11 +325,25 @@ class MatchSession:
 
         resubmit = getattr(self.transport, "supports_resubmit", True)
         decoded = None
+        prior_plan = None
+        if preplanned is not None and resubmit:
+            pred, ready = preplanned
+            if self._same_state(pred, state):
+                # đúng như dự đoán: bài lập sẵn chính là bài lập lúc này với cùng ngân sách
+                self.strategist.observe(state, steps)
+                if submit(ready.plan):
+                    applied = self._remember(state, accepted["plan"], ready) or ready
+                    self._emit_day_result(state, accepted["plan"])
+                    self.log(f"{self.day_label(state.day)}: bài lập sẵn, {len(applied.result.brands)} loại, "
+                             f"{applied.result.servings} phần, gửi sau {time.monotonic() - started:.2f}s")
+                    return applied
+            else:
+                prior_plan = ready.plan
         try:
             # bộ nhớ trận ghi SAU khi biết server đã nhận bài nào (_remember), không ghi ở đây
             decoded = self.strategist.plan_day(
                 state, deadline=deadline, submit=submit if resubmit else None,
-                steps_override=steps, record=False,
+                steps_override=steps, record=False, prior_plan=prior_plan,
             )
             if not resubmit:
                 # kênh chỉ nhận một dòng trả lời cho mỗi ngày: gửi đúng bài tốt nhất

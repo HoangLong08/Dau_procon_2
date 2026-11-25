@@ -110,7 +110,8 @@ def play_one(args, tok: TeamToken, log: Log) -> int:
         session = MatchSession(transport, search_seconds=args.search_seconds,
                                net_margin=args.net_margin, role_seconds=args.role_seconds,
                                seed=args.seed, log=log, replay=replay, emit=emit,
-                               search_jobs=getattr(args, "search_jobs", 1))
+                               search_jobs=getattr(args, "search_jobs", 1),
+                               pipeline=getattr(args, "pipeline", True))
         try:
             session.run()
         except KeyboardInterrupt:
@@ -168,6 +169,7 @@ def child_command(args, ref: GameRef, token_var: str, summary_path: str, label: 
         cmd.append("--practice")
     if getattr(args, "keep", False):
         cmd.append("--keep")
+    cmd.append("--pipeline" if getattr(args, "pipeline", True) else "--no-pipeline")
     cmd += ["--live"] if args.live else ["--token-env", token_var]
     return cmd
 

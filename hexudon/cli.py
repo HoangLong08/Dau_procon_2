@@ -487,6 +487,9 @@ def build_parser() -> argparse.ArgumentParser:
                        help="mất liên lạc quá lâu thì thoát thay vì quay vô hạn")
         p.add_argument("--seed", type=int, default=0)
         p.add_argument("--out-dir", default="replays", help="thư mục ghi replay và tổng kết")
+        p.add_argument("--pipeline", action=argparse.BooleanOptionalAction, default=True,
+                       help="lập kế hoạch trước: trong lúc ngày d chạy, lập sẵn bài ngày d+1 từ trạng thái "
+                            "dự đoán rồi gửi ngay khi ngày mở (thời gian phản hồi, tiêu chí 4); chỉ contest")
         search_jobs_flag(p)
 
     p = sub.add_parser("play", help="thi đấu qua HTTP")

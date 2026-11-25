@@ -12,7 +12,7 @@ from ..simulator import run_day, wait_plan
 from ..traffic import ForecastCalibrator, TrafficForecast, counts_from_positions, parked_stay
 from .decoder import Decoded
 from .engine import day_upper_bound, make_context, plan_day, today_hard_len
-from .objective import lexicographic_gain
+from .objective import lexicographic_gain, score_day
 from .parallel import DayJob, SeedPool, run_job, total_of
 from .roles import select_roles
 from .solution import Weights
@@ -97,6 +97,10 @@ class MatchStrategist:
         self.parked_today: Dict[int, int] = {}
         self._reset_forecast(self.forecast)
         self.predicted_state: Optional[List[AgentState]] = None
+        #: dự báo đường cho ngày mai, tính trong record()
+        self.forecast_next: Optional[Dict[int, int]] = None
+        #: đã thấy ô đường nào không thông trong trạng thái thật chưa (server VN: chưa bao giờ)
+        self.saw_traffic = False
         #: bài cuối cùng submit đã nhận trong lần plan_day gần nhất
         self.last_sent: Optional[Decoded] = None
 
@@ -231,6 +235,8 @@ class MatchStrategist:
 
     def _observe_morning(self, state: DayState, status: Dict[int, int], steps: int) -> None:
         """Xe đỗ của đối thủ sáng nay, và (R6) chấm lại các mô hình dự báo theo đường thật."""
+        if any(v for v in status.values()):
+            self.saw_traffic = True
         others = [[a.pos for a in team] for team in state.others]
         road = self.config.road_cells
         self.parked_today = parked_stay(self.others_yesterday, others, road, status, steps) if others else {}
@@ -268,6 +274,25 @@ class MatchStrategist:
             elif real.fuel is not None and pred.fuel != real.fuel and real.kind == rules.PATROL:
                 self.log(f"lệch xăng agent {i}: dự đoán {pred.fuel}, server {real.fuel}")
 
+    def observe(self, state: DayState, steps: int) -> None:
+        """Phần "buổi sáng" của plan_day (đối chiếu dự đoán, xe đỗ của đối thủ, R6), cho ngày
+        được chơi bằng bài lập sẵn từ hôm trước mà không gọi plan_day."""
+        self.reconcile(state)
+        self._observe_morning(state, dict(state.road_status), steps)
+
+    def predict_next(self, state: DayState, steps: int) -> Optional[DayState]:
+        """Trạng thái đầu ngày mai theo bài đã ghi của hôm nay (record), để lập kế hoạch trước.
+
+        Vị trí và xăng cuối ngày lấy từ mô phỏng (khớp server, replay_check), kho đặt lại mỗi
+        ngày. Đường: chưa từng thấy ô nào không thông thì coi mọi ô thông (server VN), không thì
+        theo dự báo của record(). Đối thủ: vị trí sáng nay (chỉ dùng cho giao thông).
+        """
+        if self.predicted_state is None or state.day + 1 >= self.config.n_days:
+            return None
+        road = {c: v for c, v in (self.forecast_next or {}).items() if v} if self.saw_traffic else {}
+        agents = [AgentState(a.kind, a.pos, a.fuel) for a in self.predicted_state]
+        return DayState(day=state.day + 1, agents=agents, road_status=road, others=state.others, steps=steps)
+
     def plan_day(
         self,
         state: DayState,
@@ -275,16 +300,24 @@ class MatchStrategist:
         submit: Optional[Callable[[List[List[int]]], bool]] = None,
         steps_override: Optional[int] = None,
         record: bool = True,
+        observe: bool = True,
+        prior_plan: Optional[List[List[int]]] = None,
     ) -> Decoded:
         """Lập kế hoạch cho một ngày; gọi submit ngay khi có bài an toàn.
 
         Trả về bài đang được áp dụng: bài cuối cùng submit nhận (cases 11.3), hoặc
         bài tốt nhất khi không có submit. `record=False` khi bên gọi tự ghi bộ nhớ
         bằng record_applied, sau khi biết chắc server đã nhận bài nào.
+
+        Lập kế hoạch trước (session, 25/11/2026): `observe=False` khi `state` là trạng thái
+        DỰ ĐOÁN của ngày mai, để không đụng bộ nhớ "buổi sáng" (R6, xe đỗ của đối thủ).
+        `prior_plan`: bài lập sẵn từ hôm trước; hợp lệ trên trạng thái thật thì được gửi ngay
+        làm bài đầu tiên, và các bài sau chỉ được gửi khi hơn nó.
         """
         cfg = self.config
         started = time.monotonic()
-        self.reconcile(state)
+        if observe:
+            self.reconcile(state)
         # vai trò server báo mới là sự thật: lập kế hoạch theo vai trò ta MONG
         # muốn trong khi server nghĩ khác sẽ làm mọi bài bị từ chối vì E_NO_FUEL
         agents = [AgentState(a.kind, a.pos, a.fuel) for a in state.agents]
@@ -294,7 +327,8 @@ class MatchStrategist:
             self.kinds = list(server_kinds)
         status = dict(state.road_status)
         steps_today = steps_override or state.steps or cfg.steps_of_day(state.day)
-        self._observe_morning(state, status, steps_today)
+        if observe:
+            self._observe_morning(state, status, steps_today)
         if self.calibrator is not None:
             # vết hôm nay của ta chưa có (đang lập kế hoạch): tạm lấy vết hôm qua, vì số
             # hạng "các đội khác như ta" của hôm nay lớn gấp (số đội − 1) lần vết của ta
@@ -321,6 +355,12 @@ class MatchStrategist:
 
         sent = {"count": 0, "decoded": None, "gain": None}
         self.last_sent = None
+        if prior_plan is not None and submit is not None:
+            res = run_day(cfg, ctx.steps, agents, prior_plan, [s.stocks for s in cfg.spots], status)
+            if res.ok and submit(prior_plan):
+                prior = Decoded(plan=prior_plan, result=res, score=score_day(ctx, res))
+                sent.update(count=1, decoded=prior, gain=lexicographic_gain(ctx, res))
+                self.last_sent = prior
         on_safe, hooks = self._watch(state, agents, status, ctx.steps, started)
         look = self._lookahead(state, status, ctx.steps, weights=day_weights)
 
