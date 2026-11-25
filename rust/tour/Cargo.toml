@@ -1,0 +1,13 @@
+[package]
+name = "tour"
+version = "0.1.0"
+edition = "2021"
+description = "HEXUDON: team orienteering có phủ chuỗi cho một ngày (LNS), gọi từ planner/rust_tours.py"
+
+[dependencies]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"

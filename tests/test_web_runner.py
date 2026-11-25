@@ -39,6 +39,7 @@ class RunnerUnitTest(unittest.TestCase):
         self.assertIn("--token-env TEST_DAU_01", joined)
         self.assertIn("--search-seconds 3.0", joined)
         self.assertIn("--role-seconds auto", joined)
+        self.assertIn("--rust-seconds 3.0", joined)
         self.assertIn(os.path.abspath("x.env"), cmd)
         self.assertNotIn("--live", cmd)
         self.assertNotIn("--practice", cmd)

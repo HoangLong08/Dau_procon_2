@@ -185,6 +185,21 @@ class Weights:
     #: 20/11); 0 = cách cũ: giải lại lần lượt từng xe, dừng ở xe đầu tiên phủ được (mặc định tới khi đo xong)
     or_assign: float = 0.0
 
+    # --- bộ giải tour bằng Rust (rust/tour, planner/rust_tours.py, 25/11/2026) ---
+    #: > 0: mỗi ngày dành tối đa ngần này giây cho bộ giải Rust (team orienteering có phủ chuỗi,
+    #: LNS) làm điểm xuất phát của ALNS nếu tốt hơn. Không có file nhị phân thì bỏ qua
+    rs_seconds: float = 0.0
+    #: theo giây: phần tối đa của thời gian còn lại của ngày cho bước này
+    rs_share: float = 0.3
+    #: 1: tour chặn theo xăng hiện có của xe; 0: bỏ chặn (điểm hẹn xe tiếp lo, như or_fuel 0)
+    rs_fuel: float = 0.0
+    #: 1: chỉ nhận bài Rust khi (L, D, Q) hôm nay + các ngày sau (chơi tiếp R4) không kém bài
+    #: đang có; 0: nhận theo score_day (bản đầu, làm mất D trên bản đồ vòng 1 Nhật)
+    rs_look: float = 1.0
+    #: 1: chỉ nhận bài Rust khi xăng sẵn cho ngày mai của xe tuần tra (tổng min(xăng cuối
+    #: ngày, số bước ngày mai)) không ít hơn bài đang có: bộ giải không tính xăng ngày mai
+    rs_ready: float = 1.0
+
     # --- số phần trong ngày (20/11/2026, sau 2 contest thua DAU 2 tối 19/11) ---
     #: V_near đếm chuỗi xe tuần tra với tới trong ngần này phần của ngày mai. 0,5 = như cũ; 1 = chỉ
     #: thưởng chuỗi với tới được trong cả ngày mai (điều kiện cần cho D mai), nên trên bản đồ dễ D

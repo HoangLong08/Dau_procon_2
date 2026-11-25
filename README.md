@@ -4,10 +4,12 @@ Bot chơi **HEXUDON** (Tối ưu hoá lộ trình HEXUDON), phần thi Tranh tà
 Việt Nam 2026 / NAPROCK PROCON lần 18.
 
 Python thuần, **không cài gì thêm** — chỉ thư viện chuẩn. Yêu cầu Python 3.10 trở lên.
+Có hai phần tuỳ chọn; thiếu thì bot tự bỏ qua. Một là scipy, cho bước MILP. Hai là bộ giải tour bằng Rust (`rust/tour`), build bằng
+`cargo build --release --offline` (mục 3).
 
 ```bash
 git clone <repo> && cd procon-2026
-python -m unittest discover -s tests     # 343 test, phải xanh toàn bộ (Windows, macOS, Linux)
+python -m unittest discover -s tests     # 405 test, phải xanh toàn bộ (Windows, macOS, Linux)
 ```
 
 ---
@@ -151,6 +153,8 @@ Lệnh `web` và `web-bench` (server thi hexudon.hairbui76.id.vn) — **để ng
 | `--timeout` | `5.0` | hạn cứng **mỗi cuộc gọi HTTP**; riêng `/result` và `/replay` sau trận được chờ 30 s mỗi lần, thử tối đa 3 lần |
 | `--poll-seconds` | `0.5` | nhịp hỏi `/state` |
 | `--give-up-seconds` | `120` | mất liên lạc, hoặc token bị từ chối, quá lâu thì thoát thay vì quay vô hạn |
+| `--pipeline` | bật | lập trước: lập sẵn bài ngày d+1 trong lúc ngày d chạy (ngày 0 trong cửa sổ chọn xe), gửi ngay khi ngày mở; `--no-pipeline` để tắt |
+| `--rust-seconds` | `3.0` | mỗi ngày tối đa ngần này giây cho bộ giải tour bằng Rust (mục 3); `0` = tắt; chưa build `rust/tour` thì tự bỏ qua |
 
 `auto` đọc độ dài ngày và cửa sổ chọn xe từ chính server, nên BTC đổi thông số thì bot
 đổi theo. Bình thường **đừng đặt tay** `--search-seconds` hay `--role-seconds` cho `web`.
@@ -163,6 +167,7 @@ Lệnh `play` và `sandbox` (server kiểu PTIT):
 | `--net-margin` | `1.5` | lề chừa cho mạng, trừ khỏi hạn của server |
 | `--role-seconds` | `3.0` | ngân sách chọn vai trò trước ngày 0 |
 | `--search-jobs` | `auto` | số seed ALNS mỗi ngày (R7), như lệnh `web` |
+| `--rust-seconds` | `3.0` | bộ giải tour bằng Rust, như lệnh `web` |
 | `--timeout` | `2.0` | hạn cứng **mỗi cuộc gọi HTTP** |
 | `--poll-seconds` | `0.25` | nhịp hỏi `/state` (dưới 0,2 s có thể bị HTTP 429) |
 | `--give-up-seconds` | `120` | mất liên lạc quá lâu thì thoát thay vì quay vô hạn |
@@ -385,6 +390,20 @@ chạm trần mọi ngày, nên số phần Q quyết định. Ta thua DAU 2 37�
   - Sảnh 10 đội kiểu Nhật: ΔD +0,36 trên 75 cặp không phải VN, không mất L. Bản đồ mẫu (48 cặp): ΔD +0,29.
 - Biến thể `mac_dinh_19_11` trong `thi_nghiem_ai/doi_chieu_dau2.py` (và `TRUOC_E`) tái hiện hành vi trước đó.
 
+**Bộ giải tour bằng Rust (`rust/tour`, 25/11/2026):**
+- Cùng bài toán với MILP nhưng cho cả đội một lúc: team orienteering có phủ chuỗi, thứ tự (chuỗi mới, D, Q, ít bước). Thuật toán LNS: chèn tham lam ưu tiên chuỗi còn thiếu, 2-opt, or-opt, ủ mô phỏng, khởi động lại khi kẹt.
+- Python gọi file nhị phân qua stdin/stdout (`planner/rust_tours.py`). Bài Rust được giải mã, thêm điểm hẹn và vá L/D như MILP, rồi làm điểm xuất phát của ALNS nếu tốt hơn.
+- Bài Rust chỉ được nhận khi thoả hai điều kiện. Thứ nhất (`rs_ready`), không để ít xăng cho ngày mai hơn bài đang có. Thứ hai (`rs_look`), không kém theo lượt chơi tiếp các ngày sau. Lý do: bộ giải chỉ tối đa hôm nay. Bản đầu trên bản đồ vòng 1 Nhật lấy thêm 1 chuỗi ở ngày 0 nhưng để hai xe còn 1 và 6 xăng cho ngày 1 có 36 bước, nên D ngày 1 tụt từ 9 xuống 5.
+- Từ đúng trạng thái đầu ngày của DAU 2: trong 1 s, bộ giải đạt bằng số phần của DAU 2 ở hầu hết các ngày. Bản đầu (chưa có hai điều kiện nhận) cho tổng số phần như sau: 3 s/ngày từ 3139 lên 3320; 30 s/ngày từ 3248 lên 3335 (DAU 2 đạt 3341).
+- Núm: `rs_seconds` (giây mỗi ngày, 0 = tắt), `rs_share` 0,3, `rs_fuel` 0, `rs_look` 1, `rs_ready` 1.
+- Bật ở các lệnh thi đấu (`web`, `web-bench`, `play`, `sandbox`) bằng `--rust-seconds` (mặc định 3). `Weights()` giữ `rs_seconds` 0, nên test, `sim`, `bench` không tốn thêm 3 s mỗi ngày và vẫn tất định. Bộ giải chạy theo giây nên bài ra phụ thuộc tốc độ máy.
+- **Kết quả đo** (25/11, 3 s/ngày, bản có hai điều kiện nhận):
+  - Cả trận, gồm 4 bản đồ contest và 12 bản đồ sinh, mỗi bản đồ 3 seed (48 cặp): Q +13,6 ± 2,6 mỗi trận (contest +6,0, bản đồ sinh +16,2), thắng Q ở 46/48 cặp, tổng D +11 (chỉ 1 trận giảm), không mất L.
+  - Sảnh 10 đội kiểu Nhật: trên 75 cặp không phải VN, tổng ΔD −4 (−0,05 mỗi cặp, trong khoảng nhiễu). Cộng 30 seed thêm trên bản đồ mẫu thì tổng ΔD +11 trên 105 cặp. Không mất L. 15 cặp VN: Q +14,3 mỗi trận.
+  - Server giả, bản đồ `f06e9b26`, có lập trước: L20 D200 Q685 (không Rust Q670), thời gian phản hồi 15,6 s, replay khớp.
+  - Bản đầu chưa có điều kiện nhận: Q +21,5 mỗi trận, nhưng mất D trên bản đồ vòng 1 Nhật (−0,5 và −1,4 mỗi trận).
+- Build một lần (Rust edition 2021, đã thử với cargo 1.99.1; crate không có thư viện ngoài nên không tải gì từ mạng): `cd rust/tour && cargo build --release --offline`. Không có file `rust/tour/target/release/tour(.exe)` thì bot bỏ qua bước này.
+
 ### Cách chia thời gian trong một ngày
 
 Bot gửi **bài an toàn** trong khoảng 10 ms sau khi nhận trạng thái, rồi tiếp tục
@@ -400,6 +419,24 @@ tìm kiếm tới `--search-seconds`. Theo luật, bài hợp lệ cuối cùng 
 Kể cả máy treo hay mạng đứt giữa chừng, ngày đó vẫn có bài hợp lệ đã nằm ở server. Bộ
 nhớ trận (các loại đã thu, vị trí dự đoán, vết giao thông) ghi theo đúng bài server đã
 nhận, không theo bài tốt nhất bot nghĩ ra.
+
+**Lập kế hoạch trước (`--pipeline`, mặc định bật từ 25/11/2026).** Thời gian phản hồi là
+thời điểm gửi bài hợp lệ cuối cùng mỗi ngày, cộng qua các ngày. Trước đây bot tìm kiếm tới
+gần hết ngày nên mất 245–273 s mỗi trận (DAU 2: 186–240 s). Trên server VN, đường không bao
+giờ tắc, kho đặt lại mỗi ngày và simulator khớp server, nên trạng thái đầu ngày mai biết
+trước. Vì vậy:
+
+- Ngày 0: chọn vai trò dùng `ROLE_SHARE` (0,6) cửa sổ chọn xe, phần còn lại lập sẵn ngày 0.
+- Trong lúc ngày d chạy, bot lập sẵn ngày d+1 từ trạng thái dự đoán (`strategist.predict_next`),
+  dùng trọn ngân sách của ngày.
+- Gần giờ mở ngày, bot hỏi `/state` mỗi 0,2 s, dựng trạng thái thẳng từ đó (bỏ lượt
+  `GET /day`). Nếu khớp dự đoán thì gửi bài lập sẵn ngay, khoảng 0,02 s sau khi ngày mở.
+- Lệch về xe (vị trí, xăng) thì tắt lập trước cho cả trận. Chỉ lệch đường thì mô phỏng lại
+  bài lập sẵn trên đường thật: vẫn hợp lệ và không kém thì gửi; không thì chơi trực tiếp với
+  ngân sách chia đôi, lệch hai lần liền mới tắt.
+- Đo trên server giả (bản đồ `f06e9b26`, 30 s/ngày): 15,6 s cả trận, so với 260,8 s khi tắt;
+  L20 D200, Q không thấp hơn, replay khớp. 15,6 s gần như hết vào một ngày server giả có tắc
+  đường. Trên server VN không có tắc thì dự kiến khoảng 1 s.
 
 Mọi cuộc gọi mạng đều bị chặn cứng bởi hạn của ngày. `timeout` của socket chỉ áp
 cho *mỗi lần đọc*, không phải cả cuộc gọi: một server nhả dữ liệu nhỏ giọt từng kéo
@@ -457,7 +494,8 @@ xét thời gian phản hồi và lưu lượng chia cho 10 đội).
 | `hexudon/simulator.py` | **nguồn chân lý về luật**: 5 pha mỗi bước, kiểm hợp lệ (thêm `strict_fuel` cho planner), bài dự phòng `idle_plan`, gộp lệnh chờ `compact_plan` |
 | `hexudon/procs.py` | tiến trình con chạy được trên cả Windows lẫn Linux/macOS (nhóm tiến trình, dừng mềm, UTF-8) |
 | `hexudon/pathing.py`, `traffic.py` | Dijkstra trọng số đỉnh, dự báo giao thông |
-| `hexudon/planner/` | nghiệm, bộ giải mã, hàm mục tiêu, dựng nghiệm, ALNS, vai trò, bộ nhớ trận |
+| `hexudon/planner/` | nghiệm, bộ giải mã, hàm mục tiêu, dựng nghiệm, ALNS, vai trò, bộ nhớ trận; `rust_tours.py` gọi bộ giải Rust |
+| `rust/tour/` | bộ giải tour bằng Rust (chỉ thư viện chuẩn, tuỳ chọn): team orienteering có phủ chuỗi, LNS + ủ mô phỏng |
 | `hexudon/client/` | HTTP, sandbox, vòng đời trận |
 | `hexudon/offline/` | bot đối thủ, runner nhiều đội, sinh map, server luyện tập, benchmark |
 | `tests/` | kiểm thử, gồm golden test tái hiện ví dụ từng bước của ban tổ chức |

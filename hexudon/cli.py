@@ -53,7 +53,7 @@ def _trim_days(config: MatchConfig, days: int) -> None:
 
 def cmd_play(args) -> int:
     from .client.http_client import HttpTransport
-    from .client.session import MatchSession, ReplayWriter
+    from .client.session import MatchSession, ReplayWriter, match_weights
 
     replay = ReplayWriter(args.replay)
     transport = HttpTransport(
@@ -64,7 +64,7 @@ def cmd_play(args) -> int:
     session = MatchSession(
         transport, search_seconds=args.search_seconds, net_margin=args.net_margin,
         role_seconds=args.role_seconds, seed=args.seed, log=_log, replay=replay,
-        search_jobs=args.search_jobs,
+        search_jobs=args.search_jobs, weights=match_weights(args.rust_seconds),
     )
     try:
         result = session.run()
@@ -77,14 +77,14 @@ def cmd_play(args) -> int:
 
 def cmd_sandbox(args) -> int:
     from .client.sandbox_client import SandboxTransport
-    from .client.session import MatchSession, ReplayWriter
+    from .client.session import MatchSession, ReplayWriter, match_weights
 
     replay = ReplayWriter(args.replay)
     transport = SandboxTransport(log=_log, replay=replay)
     session = MatchSession(
         transport, search_seconds=args.search_seconds, net_margin=args.net_margin,
         role_seconds=args.role_seconds, seed=args.seed, log=_log, replay=replay,
-        search_jobs=args.search_jobs,
+        search_jobs=args.search_jobs, weights=match_weights(args.rust_seconds),
     )
     try:
         session.run()
@@ -471,6 +471,13 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--timeout", type=float, default=5.0,
                        help="hạn cứng mỗi cuộc gọi HTTP, tính cả lúc server trả nhỏ giọt")
 
+    def rust_flag(p):
+        from .client.session import RUST_SECONDS
+        p.add_argument("--rust-seconds", type=float, default=RUST_SECONDS,
+                       help="bộ giải tour bằng Rust (rust/tour, build bằng cargo build --release --offline): "
+                            "mỗi ngày tối đa ngần này giây làm điểm xuất phát của ALNS; mặc định %(default)s, "
+                            "0 = tắt; chưa build thì tự bỏ qua")
+
     def search_jobs_flag(p):
         p.add_argument("--search-jobs", type=_jobs_or_auto, default=None,
                        help="số seed ALNS mỗi ngày, mỗi seed một tiến trình (R7); "
@@ -489,8 +496,10 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--out-dir", default="replays", help="thư mục ghi replay và tổng kết")
         p.add_argument("--pipeline", action=argparse.BooleanOptionalAction, default=True,
                        help="lập kế hoạch trước: trong lúc ngày d chạy, lập sẵn bài ngày d+1 từ trạng thái "
-                            "dự đoán rồi gửi ngay khi ngày mở (thời gian phản hồi, tiêu chí 4); chỉ contest")
+                            "dự đoán rồi gửi ngay khi ngày mở (thời gian phản hồi, tiêu chí 4); chỉ contest; "
+                            "mặc định bật, --no-pipeline để tắt")
         search_jobs_flag(p)
+        rust_flag(p)
 
     p = sub.add_parser("play", help="thi đấu qua HTTP")
     p.add_argument("--url", required=True, help="ví dụ http://10.0.0.5:8099")
@@ -505,12 +514,14 @@ def build_parser() -> argparse.ArgumentParser:
                    help="mất liên lạc quá lâu thì thoát thay vì quay vô hạn")
     common(p)
     search_jobs_flag(p)
+    rust_flag(p)
     p.set_defaults(func=cmd_play)
 
     p = sub.add_parser("sandbox", help="thi đấu qua stdin/stdout (JSON Lines)")
     p.add_argument("--replay", default=None)
     common(p)
     search_jobs_flag(p)
+    rust_flag(p)
     p.set_defaults(func=cmd_sandbox)
 
     p = sub.add_parser("sim", help="chạy một trận offline")

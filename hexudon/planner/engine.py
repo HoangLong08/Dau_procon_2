@@ -4,6 +4,7 @@ import dataclasses
 import time
 from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
 
+from .. import rules
 from ..model import AgentState, MatchConfig
 from ..pathing import DayGraph, DistTable, LegBook
 from .alns import Elite, _remove_stops, improve
@@ -303,6 +304,66 @@ def pick_by_lookahead(ctx: DayContext, best_sol: DaySolution, best_dec: Decoded,
     return sol, dec, "rollout", info
 
 
+def fuel_ready(ctx: DayContext, decoded: Decoded) -> int:
+    """Xăng sẵn cho ngày mai: tổng min(xăng cuối ngày, số bước ngày mai) của các xe tuần tra
+    (0 ở ngày cuối)."""
+    if ctx.next_steps <= 0 or not decoded.result.ok:
+        return 0
+    return sum(min(f, ctx.next_steps) for a, f in zip(ctx.agents, decoded.result.end_fuel)
+               if a.kind == rules.PATROL)
+
+
+def rust_start(ctx: DayContext, sol: DaySolution, decoded: Decoded, deadline: Optional[float],
+               better: Callable[[DaySolution, Decoded], None], seed: int = 0,
+               lookahead: Optional[Callable[[Decoded], Tuple[int, int, int]]] = None) -> Tuple[DaySolution, Decoded]:
+    """Tour của bộ giải Rust (rust/tour), giải mã, thêm điểm hẹn và vá L/D; trả nó nếu hơn bài
+    đang có theo score_day, không thì giữ nguyên. Không có file nhị phân thì không làm gì.
+
+    Có `lookahead` (R4, không phải ngày cuối) thì còn phải không kém bài đang có theo (L, D, Q)
+    hôm nay cộng các ngày sau khi chơi tiếp, và (rs_ready) không để ít xăng cho ngày mai hơn
+    (fuel_ready): bộ giải Rust chỉ tối đa hôm nay, nên trên bản đồ xăng ít (vòng 1 Nhật,
+    25/11) nó lấy thêm 1 chuỗi ngày 0 mà để hai xe còn 1 và 6 xăng cho ngày 1 có 36 bước."""
+    from . import rust_tours
+    from .orienteering import add_meets
+
+    if not rust_tours.available():
+        return sol, decoded
+    w = ctx.weights
+    secs = w.rs_seconds
+    if deadline is not None:
+        secs = min(secs, w.rs_share * max(0.0, deadline - time.monotonic()))
+    if secs <= 0.05:
+        return sol, decoded
+    tours = rust_tours.solve(ctx, secs, seed=seed + 1, cap_fuel=w.rs_fuel > 0)
+    if tours is None:
+        return sol, decoded
+    cand = DaySolution(tours=tours, meets=[], waits={})
+    if w.rs_fuel > 0:
+        dec = decode(ctx, cand)
+    else:
+        cand, dec = add_meets(ctx, cand, deadline)
+    if not dec.result.ok:
+        return sol, decoded
+    cand, dec = ensure_new_chains(ctx, cand, dec)
+    cand, dec = ensure_today_chains(ctx, cand, dec, deadline=deadline)
+    if dec.score <= decoded.score:
+        return sol, decoded
+    if w.rs_ready > 0 and fuel_ready(ctx, dec) < fuel_ready(ctx, decoded):
+        return sol, decoded
+    if lookahead is not None and decoded.result.ok and dec.result.ok:
+        mine = lexicographic_gain(ctx, dec.result)
+        theirs = lexicographic_gain(ctx, decoded.result)
+        hard = today_hard_len(ctx, [decoded.result, dec.result])
+        if mine[:hard] < theirs[:hard]:
+            return sol, decoded
+        total_r = tuple(a + b for a, b in zip(mine, lookahead(dec)))
+        total_s = tuple(a + b for a, b in zip(theirs, lookahead(decoded)))
+        if total_r < total_s:
+            return sol, decoded
+    better(cand, dec)
+    return cand, dec
+
+
 def orienteering_start(ctx: DayContext, sol: DaySolution, decoded: Decoded, deadline: Optional[float],
                        better: Callable[[DaySolution, Decoded], None]) -> Tuple[DaySolution, Decoded]:
     """Bước E: tour orienteering tối ưu của từng xe (MILP), giải mã và vá L/D; trả nó nếu hơn bài
@@ -394,6 +455,10 @@ def plan_day(
         if patched is not first:
             start_sol, start_dec = patched_sol, patched
             better(start_sol, start_dec)
+    if w.rs_seconds > 0:
+        look_rs = lookahead if (w.rs_look > 0 and w.rollout_k >= 1 and ctx.days_left > 0) else None
+        start_sol, start_dec = rust_start(ctx, start_sol, start_dec, deadline, better, seed=seed,
+                                          lookahead=look_rs)
     if w.or_seconds > 0:
         start_sol, start_dec = orienteering_start(ctx, start_sol, start_dec, deadline, better)
     # R3: ngày cuối end_value = 0, nên đạt cận trên của hôm nay là xong: dừng ngay để bài

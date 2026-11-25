@@ -16,7 +16,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from ..procs import child_env, detached_kwargs
 from .net import JsonHttp
-from .session import MatchSession, ReplayWriter
+from .session import MatchSession, ReplayWriter, match_weights
 from .tokens import TeamToken
 from .web_api import FINISHED, IN_PROGRESS, SELECTING, GameStatus, WebApi, error_detail
 from .web_games import CONTEST, PRACTICE, GameRef, ResolveError, describe_status, fetch_questions, format_table, resolve
@@ -111,7 +111,8 @@ def play_one(args, tok: TeamToken, log: Log) -> int:
                                net_margin=args.net_margin, role_seconds=args.role_seconds,
                                seed=args.seed, log=log, replay=replay, emit=emit,
                                search_jobs=getattr(args, "search_jobs", 1),
-                               pipeline=getattr(args, "pipeline", True))
+                               pipeline=getattr(args, "pipeline", True),
+                               weights=match_weights(getattr(args, "rust_seconds", 0.0)))
         try:
             session.run()
         except KeyboardInterrupt:
@@ -164,7 +165,8 @@ def child_command(args, ref: GameRef, token_var: str, summary_path: str, label: 
            "--poll-seconds", repr(float(args.poll_seconds)),
            "--give-up-seconds", repr(float(args.give_up_seconds)), "--seed", str(args.seed),
            "--search-seconds", _auto(args.search_seconds), "--role-seconds", _auto(args.role_seconds),
-           "--search-jobs", _jobs(getattr(args, "search_jobs", 1))]
+           "--search-jobs", _jobs(getattr(args, "search_jobs", 1)),
+           "--rust-seconds", repr(float(getattr(args, "rust_seconds", 0.0)))]
     if ref.mode == PRACTICE:
         cmd.append("--practice")
     if getattr(args, "keep", False):

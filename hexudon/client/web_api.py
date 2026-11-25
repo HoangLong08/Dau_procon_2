@@ -6,7 +6,7 @@ Hai service dùng hai kiểu header (đo ngày 2026-09-21): game service cần
 """
 
 from dataclasses import dataclass, field
-from typing import Callable, List, Optional, Sequence
+from typing import Callable, Dict, List, Optional, Sequence
 
 from .net import JsonHttp, Response
 
@@ -50,6 +50,10 @@ class GameStatus:
     selection_limit: Optional[float] = None
     team: dict = field(default_factory=dict)
     read_at: float = 0.0          # time.time() lúc đọc; kênh truyền tự điền
+    #: road_condition: ô đường -> 0/1/2 (dựng trạng thái ngày thẳng từ /state, 25/11/2026)
+    road: Dict[int, int] = field(default_factory=dict)
+    #: mọi đội: id (chuỗi) -> dict của đội trong /state
+    teams: dict = field(default_factory=dict)
 
     @staticmethod
     def from_json(obj: dict, team_id: Optional[int] = None) -> "GameStatus":
@@ -66,7 +70,21 @@ class GameStatus:
             selection_opens_in=_float_or_none(obj.get("selection_opens_in")),
             selection_limit=_float_or_none(obj.get("agent_selection_time_limit")),
             team=team if isinstance(team, dict) else {},
+            road=_road_of(obj.get("road_condition")),
+            teams=teams,
         )
+
+
+def _road_of(obj) -> Dict[int, int]:
+    if not isinstance(obj, dict):
+        return {}
+    out = {}
+    for k, v in obj.items():
+        try:
+            out[int(k)] = int(v or 0)
+        except (TypeError, ValueError):
+            continue
+    return out
 
 
 class WebApi:

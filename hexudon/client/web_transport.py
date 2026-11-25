@@ -17,7 +17,8 @@ import os
 import time
 from typing import Callable, Dict, List, Optional, Sequence
 
-from ..model import Ack, DayState, MatchConfig, ProtocolError
+from .. import rules
+from ..model import Ack, AgentState, DayState, MatchConfig, ProtocolError
 from ..simulator import wait_plan
 from .net import Response
 from .replay_check import check as check_replay
@@ -29,6 +30,10 @@ from .web_games import PRACTICE, GameRef
 WAKE_BEFORE_WINDOW = 15.0
 #: mỗi giấc chờ tối đa ngần này, để vẫn thấy BTC reset hay dời giờ
 MAX_NAP = 30.0
+#: chế độ nhanh (có bài lập sẵn): nhịp hỏi /state quanh giờ mở ngày (dưới 0,2 s có thể bị 429)
+FAST_POLL = 0.2
+#: chế độ nhanh: ngủ tới trước giờ mở dự kiến ngần này giây rồi hỏi theo FAST_POLL
+FAST_WAKE = 0.3
 #: nhịp gửi lại request và đọc lại .env khi token bị từ chối
 TOKEN_RETRY_SECONDS = 5.0
 RETRY_SECONDS = 0.3
@@ -109,6 +114,10 @@ class WebTransport(Transport):
         self.sleep = sleep
         #: practice: mỗi lần nộp là chốt ngày, nên session chỉ được gửi một lần
         self.supports_resubmit = not self.practice
+        #: wait_day_state(fast=True): dựng trạng thái ngày thẳng từ /state (bỏ một lượt GET /day)
+        self.supports_fast_state = not self.practice
+        #: thứ tự các đội khác trong /day gần nhất (others theo đúng thứ tự đó ở chế độ nhanh)
+        self._others_ids: Optional[List[str]] = None
         self.config: Optional[MatchConfig] = None
         self.window: Optional[SelectionWindow] = None
         self.selection_limit: Optional[float] = None
@@ -282,7 +291,9 @@ class WebTransport(Transport):
 
     # ---- mỗi ngày ----
 
-    def wait_day_state(self, kinds: Optional[Sequence[int]] = None) -> DayState:
+    def wait_day_state(self, kinds: Optional[Sequence[int]] = None, fast: bool = False) -> DayState:
+        """Chờ ngày mới. `fast` (có bài lập sẵn cho ngày tới): ngủ tới sát giờ mở, hỏi /state dày
+        hơn, và dựng trạng thái thẳng từ /state; thiếu dữ liệu thì lấy /day như thường."""
         kinds = list(kinds) if kinds is not None else self.kinds
         failures = 0
         last_good = self.clock()
@@ -299,7 +310,9 @@ class WebTransport(Transport):
                 self.get_result()          # kết quả nằm ở self.result; thông điệp chỉ là một câu ngắn
                 raise MatchEnded("câu đã kết thúc")
             if st.status == IN_PROGRESS and st.day > self.last_day:
-                state = self._fetch_day(st, kinds)
+                state = self._state_from_status(st) if fast else None
+                if state is None:
+                    state = self._fetch_day(st, kinds)
                 if state is not None:
                     self.last_day = state.day
                     return state
@@ -309,6 +322,11 @@ class WebTransport(Transport):
             if st.status == SELECTING and st.selection_deadline_in is not None:
                 # vai trò đã gửi, cửa sổ còn mở: ngủ tới sát giờ mở ngày 0 thay vì hỏi mỗi nhịp
                 nap = min(max(self.poll_seconds, st.selection_deadline_in - 1.0), MAX_NAP)
+            if fast:
+                left = st.selection_deadline_in if st.status == SELECTING else st.day_deadline_in
+                if left is not None:
+                    nap = min(MAX_NAP, left - FAST_WAKE) if left > FAST_WAKE + FAST_POLL else FAST_POLL
+                nap = max(FAST_POLL, nap)
             self.sleep(nap)
 
     def _practice_stuck(self, st: GameStatus) -> bool:
@@ -323,12 +341,50 @@ class WebTransport(Transport):
         self.sleep(1.0)
         return True
 
+    def _state_from_status(self, st: GameStatus) -> Optional[DayState]:
+        """Trạng thái ngày dựng từ /state: vị trí, xăng, loại xe của đội ta, tình trạng đường, số
+        bước, hạn ngày, và xe các đội khác. Thiếu thứ gì thì trả None (session lấy /day)."""
+        agents_json = st.team.get("agents") if isinstance(st.team, dict) else None
+        if (self.practice or not agents_json or st.day_deadline_in is None or not st.steps_today
+                or self.config is None):
+            return None
+        try:
+            order = sorted(agents_json, key=lambda a: int(a.get("agent_id", 0)))
+            agents = []
+            for a in order:
+                kind = rules.REFUEL if a.get("type") == "refuel" else rules.PATROL
+                fuel = a.get("fuel")
+                if kind == rules.PATROL and fuel is None:
+                    return None
+                agents.append(AgentState(kind, int(a["cell"]), int(fuel) if fuel is not None else 0))
+            if len(agents) != self.config.n_agents:
+                return None
+            mine = str(self.team_id)
+            ids = self._others_ids or [t for t in st.teams if t != mine]
+            others = []
+            for tid in ids:
+                team = st.teams.get(tid) or {}
+                lst = team.get("agents") or []
+                others.append([AgentState(rules.REFUEL if a.get("type") == "refuel" else rules.PATROL,
+                                          int(a["cell"]), -1)
+                               for a in sorted(lst, key=lambda a: int(a.get("agent_id", 0)))])
+        except (KeyError, TypeError, ValueError):
+            return None
+        state = DayState(day=st.day, agents=agents, road_status={c: v for c, v in st.road.items() if v},
+                         others=others, ends_at=st.read_at + st.day_deadline_in, steps=st.steps_today)
+        self.kinds = [a.kind for a in agents]
+        return state
+
     def _fetch_day(self, st: GameStatus, kinds) -> Optional[DayState]:
         resp = self._call("day", self.api.day)
         if resp.status != 200 or not isinstance(resp.payload, dict):
             if resp.status != 409:
                 self.log(f"/day lỗi (HTTP {resp.status}): {error_detail(resp.payload)}")
             return None
+        try:
+            self._others_ids = [str(o.get("id")) for o in resp.payload.get("others", []) or []]
+        except AttributeError:
+            self._others_ids = None
         try:
             state = DayState.from_json(resp.payload, kinds, width=self.config.width,
                                        fuel_limits=self.config.fuel_limits)

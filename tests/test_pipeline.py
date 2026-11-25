@@ -10,7 +10,7 @@ import unittest
 
 from hexudon import rules
 from hexudon.client.session import PIPELINE_FROM_DAY, MatchSession
-from hexudon.client.transport import MatchEnded, Transport
+from hexudon.client.transport import MatchEnded, SelectionWindow, Transport
 from hexudon.model import Ack, AgentState, DayState
 from hexudon.offline.mapgen import generate
 from hexudon.simulator import run_day, wait_plan
@@ -19,10 +19,12 @@ from hexudon.simulator import run_day, wait_plan
 class TimedTransport(Transport):
     """Server giả có giờ: ngày d mở lúc start + d·T, hết giờ thì áp dụng bài hợp lệ cuối cùng."""
 
-    def __init__(self, config, day_seconds, perturb_day=None):
+    def __init__(self, config, day_seconds, perturb_day=None, window=None):
         self.config = config
         self.T = day_seconds
         self.perturb_day = perturb_day
+        #: giây của cửa sổ chọn xe (có hạn như contest), hoặc None: kênh không biết cửa sổ
+        self.window = window
         self.kinds = None
         self.day = -1
         self.start = None
@@ -32,7 +34,14 @@ class TimedTransport(Transport):
         self.servings = 0
 
     def get_setup(self):
+        if self.window is not None:
+            self.start = time.time() + self.window
         return self.config
+
+    def selection_window(self):
+        if self.window is None:
+            return None
+        return SelectionWindow(open=True, deadline=self.start, limit=self.window, reserve=0.05)
 
     def send_assignment(self, kinds, deadline=None):
         self.kinds = list(kinds)
@@ -45,8 +54,9 @@ class TimedTransport(Transport):
         return [s.stocks for s in self.config.spots]
 
     def wait_day_state(self, kinds=None):
-        if self.start is None:
-            self.start = time.time() + 0.05
+        if self.agents is None:
+            if self.start is None:
+                self.start = time.time() + 0.05
             self.agents = [AgentState(k, p, self.config.fuel_limits)
                            for k, p in zip(self.kinds, self.config.agent_starts)]
         else:
@@ -85,9 +95,9 @@ def config(days=5, T=1.5):
     return cfg
 
 
-def play(pipeline, perturb_day=None, T=1.5):
+def play(pipeline, perturb_day=None, T=1.5, window=None):
     cfg = config(T=T)
-    transport = TimedTransport(cfg, T, perturb_day=perturb_day)
+    transport = TimedTransport(cfg, T, perturb_day=perturb_day, window=window)
     logs = []
     session = MatchSession(transport, search_seconds=None, net_margin=0.2, role_seconds=0.3, seed=1,
                            log=logs.append, search_jobs=1, pipeline=pipeline)
@@ -119,6 +129,39 @@ class PipelineTest(unittest.TestCase):
         # bài lập sẵn vẫn hợp lệ trên trạng thái thật nên được gửi ngay; sau đó lập như thường
         self.assertLess(tr.submits[PIPELINE_FROM_DAY + 1][0][0], 0.3)
         self.assertEqual(session.strategist.servings_total, tr.servings)
+
+    def test_day0_is_planned_inside_the_selection_window(self):
+        # vai trò chọn trong phần đầu cửa sổ, ngày 0 lập sẵn trong phần sau: ngày nào cũng gửi ngay
+        cfg, tr, session, logs = play(True, window=3.0)
+        self.assertEqual(sorted(tr.accepted), list(range(cfg.n_days)))
+        for day in range(cfg.n_days):
+            sent = tr.submits[day]
+            self.assertEqual(len(sent), 1, f"ngày {day}: chỉ gửi bài lập sẵn")
+            self.assertLess(sent[0][0], 0.3, f"ngày {day}: gửi ngay khi ngày mở")
+        self.assertEqual(session.strategist.servings_total, tr.servings)
+
+    def test_a_road_that_differs_off_the_route_keeps_the_preplanned_plan(self):
+        # server có tắc mà dự báo không thấy (server giả 2 đội): bài vẫn hợp lệ, cùng (L, D, Q)
+        from hexudon.planner.strategy import MatchStrategist
+        cfg = config()
+        session = MatchSession(TimedTransport(cfg, 1.5), pipeline=True)
+        session.config = cfg
+        strat = session.strategist = MatchStrategist(cfg, search_seconds=0.3, net_margin=0.0, seed=1)
+        kinds = [rules.PATROL, rules.PATROL, rules.REFUEL]
+        strat.kinds = kinds
+        agents = [AgentState(k, p, cfg.fuel_limits) for k, p in zip(kinds, cfg.agent_starts)]
+        pred = DayState(day=1, agents=agents, road_status={}, steps=cfg.steps_of_day(1))
+        ready = strat.plan_day(pred, deadline=time.monotonic() + 0.3, submit=None, steps_override=pred.steps,
+                               record=False, observe=False)
+        off = [c for c in cfg.road_cells if c not in ready.result.stay]
+        if not off:
+            self.skipTest("bản đồ không có ô đường ngoài lộ trình")
+        jammed = DayState(day=1, agents=list(agents), road_status={off[0]: rules.JAMMED}, steps=pred.steps)
+        self.assertFalse(session._same_state(pred, jammed))
+        self.assertTrue(session._usable((pred, ready), jammed))
+        moved = [AgentState(a.kind, a.pos, a.fuel - 1 if a.kind == rules.PATROL else a.fuel) for a in agents]
+        self.assertFalse(session._usable((pred, ready), DayState(day=1, agents=moved, road_status={},
+                                                                  steps=pred.steps)))
 
     def test_off_without_a_timed_day(self):
         cfg = config()

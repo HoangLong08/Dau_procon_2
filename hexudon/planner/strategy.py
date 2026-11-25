@@ -151,6 +151,9 @@ class MatchStrategist:
         if role_weights.or_seconds > 0:
             # Bước E: chơi thử hàng chục trận, MILP từng ngày quá chậm cho việc đó
             role_weights = dataclasses.replace(role_weights, or_seconds=0.0)
+        if role_weights.rs_seconds > 0:
+            # chơi thử giữ như cũ: mỗi ngày một tiến trình Rust là quá nhiều cho hàng chục trận
+            role_weights = dataclasses.replace(role_weights, rs_seconds=0.0)
         kinds, options = select_roles(
             self.config, budget_seconds=budget, weights=role_weights, seed=self.seed, log=self.log, **extra
         )
@@ -279,6 +282,13 @@ class MatchStrategist:
         được chơi bằng bài lập sẵn từ hôm trước mà không gọi plan_day."""
         self.reconcile(state)
         self._observe_morning(state, dict(state.road_status), steps)
+
+    def predict_day0(self) -> DayState:
+        """Trạng thái đầu ngày 0 theo vai trò đã chọn: xe ở ô xuất phát, xe tuần tra đầy xăng,
+        đường thông, kho theo config. Dùng để lập sẵn ngày 0 trong cửa sổ chọn xe."""
+        cfg = self.config
+        agents = [AgentState(self.kinds[i], cfg.agent_starts[i], cfg.fuel_limits) for i in range(cfg.n_agents)]
+        return DayState(day=0, agents=agents, road_status={}, others=[], steps=cfg.steps_of_day(0))
 
     def predict_next(self, state: DayState, steps: int) -> Optional[DayState]:
         """Trạng thái đầu ngày mai theo bài đã ghi của hôm nay (record), để lập kế hoạch trước.
