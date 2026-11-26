@@ -36,6 +36,8 @@ PIPELINE_MIN_SECONDS = 2.0
 #: lập kế hoạch trước, contest: chọn vai trò dùng ngần này phần thời gian còn lại của cửa sổ chọn
 #: xe; phần sau lập sẵn ngày 0 (trạng thái đầu ngày 0 biết trước khi đã có vai trò)
 ROLE_SHARE = 0.6
+#: lập kế hoạch trước: bài lập sẵn không dùng được ngần này ngày liền thì tắt cho cả trận
+MISS_LIMIT = 2
 
 
 class ReplayWriter:
@@ -90,10 +92,10 @@ class MatchSession:
         self.role_share = ROLE_SHARE
         #: mốc time.time() ngày 0 mở (hạn cửa sổ chọn xe), nếu kênh truyền biết
         self._day0_opens: Optional[float] = None
-        #: tắt cho phần còn lại của trận khi trạng thái thật lệch dự đoán (server có tắc đường)
+        #: tắt cho phần còn lại của trận khi trạng thái thật lệch dự đoán MISS_LIMIT ngày liền
         self.pipeline_off = False
-        #: số ngày liền bài lập sẵn hỏng vì đường khác dự báo
-        self._road_misses = 0
+        #: số ngày liền bài lập sẵn không dùng được (xe hoặc đường khác dự đoán)
+        self._misses = 0
         #: R7: số seed ALNS mỗi ngày; None = auto (strategy.resolve_search_jobs)
         self.search_jobs = search_jobs
         self.search_seconds = search_seconds
@@ -164,17 +166,23 @@ class MatchSession:
                 reason = self._mismatch(use, state)
                 matched = reason is None
                 if matched:
-                    self._road_misses = 0
+                    self._misses = 0
                 else:
                     agents_off = not self._same_state(use[0], state, roads=False)
+                    foreign = agents_off and (state.day - 1) in getattr(self.transport, "foreign_submits", {})
+                    if foreign:
+                        reason = "bài server áp dụng hôm qua không phải của bot này: có client khác nộp bài"
                     self.log(f"{self.day_label(state.day)}: bài lập sẵn không dùng được ({reason})")
-                    if agents_off or self._road_misses >= 1:
-                        # xe lệch dự đoán là mô hình sai; đường lệch hai ngày liền là server có tắc
-                        # mà dự báo không theo kịp
+                    # một ngày lệch (client khác nộp đè, tắc đường bất chợt): hôm nay lập trực tiếp với
+                    # một phần ngân sách, phần còn lại lập trước ngày mai từ trạng thái THẬT. Lệch
+                    # MISS_LIMIT ngày liền thì dự đoán không theo kịp server: tắt cho cả trận. Bài bị
+                    # client khác đè không nói gì về dự đoán nên không tính
+                    if not foreign:
+                        self._misses += 1
+                    if self._misses >= MISS_LIMIT:
                         self.pipeline_off = True
-                        self.log(f"{self.day_label(state.day)}: tắt lập kế hoạch trước cho phần còn lại của trận")
-                    else:
-                        self._road_misses += 1
+                        self.log(f"{self.day_label(state.day)}: lệch {self._misses} ngày liền; tắt lập kế "
+                                 f"hoạch trước cho phần còn lại của trận")
             pipe = self._pipeline_ready(state, preplanned=matched)
             try:
                 # ngày không có bài lập sẵn dùng được: chừa phần cuối ngân sách để lập trước ngày sau

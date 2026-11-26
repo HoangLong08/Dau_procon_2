@@ -124,6 +124,13 @@ class WebTransport(Transport):
         self.kinds: Optional[List[int]] = None
         self.last_day = -1
         self.accepted_plans: Dict[int, List[List[int]]] = {}
+        #: theo ngày: số bài server đã nhận từ chính bot này, số lần POST bài (cả lần mất phản hồi,
+        #: thử lại), và giờ (clock) nhận bài cuối
+        self._own_submits: Dict[int, int] = {}
+        self._own_tries: Dict[int, int] = {}
+        self._own_last_at: Dict[int, float] = {}
+        #: ngày có client khác nộp bài cho đội (26/11): ngày -> {"server": N, "bot": M, ...}
+        self.foreign_submits: Dict[int, dict] = {}
         self.result: Optional[dict] = None
         self._bare: set = set()          # endpoint practice đã phải lùi về ID trần
         self._sent_at = 0.0              # mốc ngay trước lời gọi gần nhất
@@ -179,11 +186,41 @@ class WebTransport(Transport):
             st = GameStatus.from_json(resp.payload, self.team_id)
             # mốc TRƯỚC khi gọi: hạn tính ra chỉ có thể sớm hơn thật, không bao giờ muộn hơn
             st.read_at = self._sent_at
+            self._check_foreign(st)
             return st
         if resp.status == 404:
             raise MatchEnded(f"không có câu {self.ref.game_id} (HTTP 404: {error_detail(resp.payload)})")
         self.log(f"/state lỗi (HTTP {resp.status}): {error_detail(resp.payload)}")
         return None
+
+    def _check_foreign(self, st: GameStatus) -> None:
+        """Server ghi cho đội nhiều bài hơn số lần bot này POST trong ngày: có client khác (máy
+        khác, người khác hoặc website) nộp bài bằng cùng token. Server dùng bài hợp lệ cuối cùng
+        nó nhận, nên bài, điểm và thời gian phản hồi của ngày đó có thể là của client kia (trận
+        1addebd7 ngày 25/11: server ghi 7 bài ngày 0, bot gửi 1, thời gian phản hồi 254 s).
+
+        So với số lần POST (kể cả lần mất phản hồi, thử lại) nên một bài server nhận mà bot
+        không biết không bị tính là client khác."""
+        if self.practice or st.status != "in_progress" or st.day is None or st.day < 0:
+            return
+        team = st.team if isinstance(st.team, dict) else {}
+        count = team.get("submit_count")
+        if not isinstance(count, int) or isinstance(count, bool):
+            return
+        if count <= self._own_tries.get(st.day, 0):
+            return
+        entry = {"server": count, "bot": self._own_submits.get(st.day, 0)}
+        last = team.get("last_submitted_at")
+        mine = self._own_last_at.get(st.day)
+        if isinstance(last, (int, float)) and not isinstance(last, bool) and mine is not None:
+            entry["last_after_bot_s"] = round(float(last) - mine, 1)
+        first = st.day not in self.foreign_submits
+        self.foreign_submits[st.day] = entry
+        if first:
+            self.log(f"CẢNH BÁO: server ghi {count} bài ngày {st.day + 1} cho đội {self.team_id} nhưng bot "
+                     f"này chỉ gửi {entry['bot']} — có client khác đang nộp bài cho đội (máy khác, người "
+                     f"khác hoặc website). Server dùng bài cuối cùng nó nhận, nên bài, điểm và thời gian "
+                     f"phản hồi của ngày này có thể theo client đó. Mỗi đội chỉ để MỘT client chơi.")
 
     def _check_silence(self, last_good: float) -> None:
         silence = self.clock() - last_good
@@ -413,11 +450,18 @@ class WebTransport(Transport):
                      deadline: Optional[float] = None) -> Ack:
         endpoint = "practice/actions" if self.practice else "actions"
         post = self.api.practice_actions if self.practice else self.api.actions
-        resp = self._post(endpoint, lambda gid: post(gid, day, plan, deadline=deadline),
-                          deadline, max_attempts=5)
+
+        def once(gid: str) -> Response:
+            # mọi lần POST đều có thể tới server, kể cả lần mất phản hồi (_check_foreign)
+            self._own_tries[day] = self._own_tries.get(day, 0) + 1
+            return post(gid, day, plan, deadline=deadline)
+
+        resp = self._post(endpoint, once, deadline, max_attempts=5)
         payload = resp.payload if isinstance(resp.payload, dict) else None
         if _accepted(resp):
             self.accepted_plans[day] = [list(seq) for seq in plan]
+            self._own_submits[day] = self._own_submits.get(day, 0) + 1
+            self._own_last_at[day] = self.clock()
             return Ack(ok=True, raw=payload)
         reason = error_detail(resp.payload) or f"HTTP {resp.status}"
         return Ack(ok=False, reason=reason, raw=payload)
@@ -468,6 +512,14 @@ class WebTransport(Transport):
             else:
                 self.log(report.summary())
                 summary["replay_check"] = report.to_json()
+                bad = report.days_with_mismatch()
+                if bad and set(bad) <= set(self.foreign_submits):
+                    self.log("các ngày lệch replay đều là ngày có client khác nộp bài cho đội: server "
+                             "áp dụng bài của client đó, không phải simulator sai luật")
+        if self.foreign_submits:
+            summary["foreign_submits"] = {str(day): entry for day, entry in sorted(self.foreign_submits.items())}
+            days = ", ".join(str(day + 1) for day in sorted(self.foreign_submits))
+            self.log(f"CẢNH BÁO: có client khác nộp bài cho đội ở ngày {days} (xem foreign_submits trong tổng kết)")
         if summary_path:
             directory = os.path.dirname(summary_path)
             if directory:

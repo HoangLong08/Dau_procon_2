@@ -431,12 +431,23 @@ trước. Vì vậy:
   dùng trọn ngân sách của ngày.
 - Gần giờ mở ngày, bot hỏi `/state` mỗi 0,2 s, dựng trạng thái thẳng từ đó (bỏ lượt
   `GET /day`). Nếu khớp dự đoán thì gửi bài lập sẵn ngay, khoảng 0,02 s sau khi ngày mở.
-- Lệch về xe (vị trí, xăng) thì tắt lập trước cho cả trận. Chỉ lệch đường thì mô phỏng lại
-  bài lập sẵn trên đường thật: vẫn hợp lệ và không kém thì gửi; không thì chơi trực tiếp với
-  ngân sách chia đôi, lệch hai lần liền mới tắt.
+- Chỉ lệch đường thì bot mô phỏng lại bài lập sẵn trên đường thật. Bài vẫn hợp lệ và không kém thì
+  gửi luôn.
+- Lệch về xe (vị trí, xăng), hoặc bài lập sẵn hỏng vì đường, thì ngày đó bot chơi trực tiếp với
+  khoảng một nửa ngân sách. Phần còn lại dùng để lập trước ngày sau từ trạng thái thật. Chỉ khi
+  lệch hai ngày liền (`MISS_LIMIT`) bot mới tắt lập trước cho phần còn lại của trận. Ngày lệch vì
+  client khác nộp đè thì không tính, vì đó không phải lỗi dự đoán. Trên server giả, client lạ đè
+  ngày 4 cùng hai ngày tắc đường: bot vẫn lập trước lại từ ngày 7, cả trận 41 s (trước khi sửa: 129 s).
 - Đo trên server giả (bản đồ `f06e9b26`, 30 s/ngày): 15,6 s cả trận, so với 260,8 s khi tắt;
   L20 D200, Q không thấp hơn, replay khớp. 15,6 s gần như hết vào một ngày server giả có tắc
-  đường. Trên server VN không có tắc thì dự kiến khoảng 1 s.
+  đường.
+- Trên server thật (contest `f06e9b26`, 26/11): mỗi ngày server ghi đúng 1 bài, cả trận
+  **12 s**, replay khớp. DAU 2 mất 57 s.
+- **Mỗi đội chỉ một client nộp bài.** Trận `1addebd7` ngày 25/11 mất 254 s vì có một client khác
+  dùng cùng token: server ghi 7 bài ở ngày 0 trong khi bot chỉ gửi 1. Server dùng bài cuối
+  cùng nó nhận nên bài của client kia đè bài của bot. Nay bot so `submit_count` của `/state`
+  với số lần chính nó POST. Nếu server ghi nhiều hơn, bot in `CẢNH BÁO: server ghi N bài …`
+  và ghi `foreign_submits` vào file tổng kết.
 
 Mọi cuộc gọi mạng đều bị chặn cứng bởi hạn của ngày. `timeout` của socket chỉ áp
 cho *mỗi lần đọc*, không phải cả cuộc gọi: một server nhả dữ liệu nhỏ giọt từng kéo

@@ -19,10 +19,16 @@ from hexudon.simulator import run_day, wait_plan
 class TimedTransport(Transport):
     """Server giả có giờ: ngày d mở lúc start + d·T, hết giờ thì áp dụng bài hợp lệ cuối cùng."""
 
-    def __init__(self, config, day_seconds, perturb_day=None, window=None):
+    def __init__(self, config, day_seconds, perturb_day=None, window=None, override_days=(),
+                 report_foreign=False):
         self.config = config
         self.T = day_seconds
         self.perturb_day = perturb_day
+        #: ngày mà một client khác nộp đè bài của bot (ở đây: bài đứng yên cả ngày)
+        self.override_days = set(override_days)
+        #: như WebTransport: báo các ngày đó qua foreign_submits (server thật có submit_count)
+        self.report_foreign = report_foreign
+        self.foreign_submits = {}
         #: giây của cửa sổ chọn xe (có hạn như contest), hoặc None: kênh không biết cửa sổ
         self.window = window
         self.kinds = None
@@ -63,6 +69,10 @@ class TimedTransport(Transport):
             time.sleep(max(0.0, self.opens(self.day + 1) - time.time()))
             steps = self.config.steps_of_day(self.day)
             plan = self.accepted.get(self.day) or wait_plan(len(self.agents), steps)
+            if self.day in self.override_days:
+                plan = wait_plan(len(self.agents), steps)
+                if self.report_foreign:
+                    self.foreign_submits[self.day] = {"server": 2, "bot": 1}
             res = run_day(self.config, steps, self.agents, plan, self.stocks(), {})
             self.servings += res.servings
             self.agents = [AgentState(a.kind, res.end_pos[i], res.end_fuel[i]) for i, a in enumerate(self.agents)]
@@ -95,9 +105,10 @@ def config(days=5, T=1.5):
     return cfg
 
 
-def play(pipeline, perturb_day=None, T=1.5, window=None):
-    cfg = config(T=T)
-    transport = TimedTransport(cfg, T, perturb_day=perturb_day, window=window)
+def play(pipeline, perturb_day=None, T=1.5, window=None, override_days=(), days=5, report_foreign=False):
+    cfg = config(days=days, T=T)
+    transport = TimedTransport(cfg, T, perturb_day=perturb_day, window=window, override_days=override_days,
+                               report_foreign=report_foreign)
     logs = []
     session = MatchSession(transport, search_seconds=None, net_margin=0.2, role_seconds=0.3, seed=1,
                            log=logs.append, search_jobs=1, pipeline=pipeline)
@@ -121,14 +132,43 @@ class PipelineTest(unittest.TestCase):
         # bộ nhớ trận khớp đúng những gì server áp dụng
         self.assertEqual(session.strategist.servings_total, tr.servings)
 
-    def test_a_state_that_differs_from_the_prediction_turns_it_off(self):
+    def test_a_state_that_differs_from_the_prediction_is_noticed(self):
         cfg, tr, session, logs = play(True, perturb_day=PIPELINE_FROM_DAY + 1)
-        self.assertTrue(session.pipeline_off)
         self.assertTrue(any("khác dự đoán" in m for m in logs))
         self.assertEqual(sorted(tr.accepted), list(range(cfg.n_days)))
-        # bài lập sẵn vẫn hợp lệ trên trạng thái thật nên được gửi ngay; sau đó lập như thường
+        # ngày lệch: lập trực tiếp, bài an toàn đi ngay; phần cuối ngân sách để lập trước ngày sau
         self.assertLess(tr.submits[PIPELINE_FROM_DAY + 1][0][0], 0.3)
-        self.assertEqual(session.strategist.servings_total, tr.servings)
+        self.assertLess(tr.submits[PIPELINE_FROM_DAY + 1][-1][0], 0.75 * tr.T)
+
+    def test_one_day_overridden_by_another_client_does_not_turn_it_off(self):
+        # trận 1addebd7 (25/11): client khác nộp đè bài ngày 0, bot tắt lập trước cả trận và mất
+        # 27 s mỗi ngày. Nay một ngày lệch chỉ làm ngày sau đó lập trực tiếp, rồi lập trước lại
+        day = PIPELINE_FROM_DAY + 1
+        cfg, tr, session, logs = play(True, override_days={day}, days=6)
+        self.assertFalse(session.pipeline_off)
+        self.assertTrue(any("không dùng được" in m for m in logs))
+        self.assertEqual(sorted(tr.accepted), list(range(cfg.n_days)))
+        for later in range(day + 2, cfg.n_days):
+            sent = tr.submits[later]
+            self.assertEqual(len(sent), 1, f"ngày {later}: lại gửi đúng bài lập sẵn")
+            self.assertLess(sent[0][0], 0.3, f"ngày {later}: gửi ngay khi ngày mở")
+
+    def test_days_overridden_by_a_reported_client_never_turn_it_off(self):
+        # bài bị client khác đè (kênh truyền thấy qua submit_count) không phải dự đoán sai
+        day = PIPELINE_FROM_DAY + 1
+        cfg, tr, session, logs = play(True, override_days={day, day + 1}, days=6, report_foreign=True)
+        self.assertFalse(session.pipeline_off)
+        self.assertTrue(any("không phải của bot này" in m for m in logs))
+        sent = tr.submits[day + 3]
+        self.assertEqual(len(sent), 1, "lại gửi đúng bài lập sẵn")
+        self.assertLess(sent[0][0], 0.3)
+
+    def test_two_days_in_a_row_that_differ_turn_it_off(self):
+        day = PIPELINE_FROM_DAY + 1
+        cfg, tr, session, logs = play(True, override_days={day, day + 1}, days=6)
+        self.assertTrue(session.pipeline_off)
+        self.assertTrue(any("ngày liền" in m for m in logs))
+        self.assertEqual(sorted(tr.accepted), list(range(cfg.n_days)))
 
     def test_day0_is_planned_inside_the_selection_window(self):
         # vai trò chọn trong phần đầu cửa sổ, ngày 0 lập sẵn trong phần sau: ngày nào cũng gửi ngay

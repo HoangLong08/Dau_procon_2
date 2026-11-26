@@ -71,7 +71,10 @@ class TeamState:
     daily_types: int = 0
     servings: int = 0
     days_submitted: int = 0
+    #: như server thật: số bài đã nhận và giờ nhận bài cuối của NGÀY ĐANG CHẠY (về 0/None khi
+    #: sang ngày); bot so số này với số bài nó gửi để biết có client khác nộp cho đội không
     submit_count: int = 0
+    last_submitted_at: Optional[float] = None
     #: tổng thời gian phản hồi của bài hợp lệ cuối cùng mỗi ngày (tiêu chí 4 của đề)
     response_seconds: float = 0.0
     #: ngày -> thời gian phản hồi của bài hợp lệ cuối cùng đã nhận trong ngày đó
@@ -145,6 +148,7 @@ class Board:
             return 400, {"detail": f"{result.error.code}: {result.error}"}
         team.plans[self.day] = [list(seq) for seq in plan]
         team.submit_count += 1
+        team.last_submitted_at = time.time()
         if response is not None:
             # bài hợp lệ cuối cùng của ngày mới tính thời gian phản hồi
             team.responses[self.day] = max(0.0, response)
@@ -178,6 +182,7 @@ class Board:
                             "frames": frames_from_trace(cfg, team.kinds, trace, result.collections)})
             team.agents = [AgentState(team.kinds[i], result.end_pos[i], result.end_fuel[i])
                            for i in range(cfg.n_agents)]
+            team.submit_count, team.last_submitted_at = 0, None
             for cell, count in result.stay.items():
                 combined[cell] = combined.get(cell, 0) + count
         self.replay_days.append({"day": self.day, "steps": steps,
@@ -194,7 +199,8 @@ class Board:
 
     def team_payload(self, team: TeamState) -> dict:
         return {"types_selected": team.types_selected, "missed_selection": team.missed_selection,
-                "days_submitted": team.days_submitted,
+                "days_submitted": team.days_submitted, "submit_count": team.submit_count,
+                "last_submitted_at": team.last_submitted_at,
                 "agents": [{"agent_id": str(i), "type": TYPE_NAME[a.kind], "cell": a.pos, "fuel": a.fuel}
                            for i, a in enumerate(team.agents)],
                 "stock": {str(s.pos): s.stocks for s in self.config.spots}}
