@@ -395,12 +395,22 @@ chạm trần mọi ngày, nên số phần Q quyết định. Ta thua DAU 2 37�
 - Python gọi file nhị phân qua stdin/stdout (`planner/rust_tours.py`). Bài Rust được giải mã, thêm điểm hẹn và vá L/D như MILP, rồi làm điểm xuất phát của ALNS nếu tốt hơn.
 - Bài Rust chỉ được nhận khi thoả hai điều kiện. Thứ nhất (`rs_ready`), không để ít xăng cho ngày mai hơn bài đang có. Thứ hai (`rs_look`), không kém theo lượt chơi tiếp các ngày sau. Lý do: bộ giải chỉ tối đa hôm nay. Bản đầu trên bản đồ vòng 1 Nhật lấy thêm 1 chuỗi ở ngày 0 nhưng để hai xe còn 1 và 6 xăng cho ngày 1 có 36 bước, nên D ngày 1 tụt từ 9 xuống 5.
 - Từ đúng trạng thái đầu ngày của DAU 2: trong 1 s, bộ giải đạt bằng số phần của DAU 2 ở hầu hết các ngày. Bản đầu (chưa có hai điều kiện nhận) cho tổng số phần như sau: 3 s/ngày từ 3139 lên 3320; 30 s/ngày từ 3248 lên 3335 (DAU 2 đạt 3341).
-- Núm: `rs_seconds` (giây mỗi ngày, 0 = tắt), `rs_share` 0,3, `rs_fuel` 0, `rs_look` 1, `rs_ready` 1.
+- **Nới hai điều kiện (27/11):** ở 8 trận contest 25–26/11 (thua DAU 2 cả 8 vì Q), hai điều kiện trên bỏ khoảng 80 phần, vì trên bản đồ VN D luôn chạm trần.
+  - `rs_safe_ld` 1: ở ngày D an toàn (đã đủ L, hôm qua đạt trần D), `rs_look` chỉ so (chuỗi mới, D) của hôm nay cộng chơi tiếp, không so Q dự báo. `rs_ready` bị bỏ khi một bình đủ cho mọi ngày còn lại (`fuel_limits` ≥ số bước lớn nhất của các ngày sau).
+  - `rs_day0_lex` 1: ngày 0 nhận bài Rust khi (chuỗi mới, D, Q) hôm nay cao hơn, thay vì so `score_day` (ngày 0 các hạng mục cuối ngày tính theo B và át số phần).
+  - `rs_safe_free` (mặc định 0) bỏ hẳn hai điều kiện ở ngày D an toàn. Nó mất D ở ngày ngắn kế sau (`gen:1000` ngày 7, 64 bước) và dao động mạnh trên bản đồ thiếu xăng, nên không dùng.
+- Núm: `rs_seconds` (giây mỗi ngày, 0 = tắt), `rs_share` 0,3, `rs_fuel` 0, `rs_look` 1, `rs_ready` 1, `rs_safe_ld` 1, `rs_day0_lex` 1, `rs_safe_free` 0. Ba núm sau chỉ có tác dụng khi `rs_seconds` > 0.
 - Bật ở các lệnh thi đấu (`web`, `web-bench`, `play`, `sandbox`) bằng `--rust-seconds` (mặc định 3). `Weights()` giữ `rs_seconds` 0, nên test, `sim`, `bench` không tốn thêm 3 s mỗi ngày và vẫn tất định. Bộ giải chạy theo giây nên bài ra phụ thuộc tốc độ máy.
 - **Kết quả đo** (25/11, 3 s/ngày, bản có hai điều kiện nhận):
   - Cả trận, gồm 4 bản đồ contest và 12 bản đồ sinh, mỗi bản đồ 3 seed (48 cặp): Q +13,6 ± 2,6 mỗi trận (contest +6,0, bản đồ sinh +16,2), thắng Q ở 46/48 cặp, tổng D +11 (chỉ 1 trận giảm), không mất L.
   - Sảnh 10 đội kiểu Nhật: trên 75 cặp không phải VN, tổng ΔD −4 (−0,05 mỗi cặp, trong khoảng nhiễu). Cộng 30 seed thêm trên bản đồ mẫu thì tổng ΔD +11 trên 105 cặp. Không mất L. 15 cặp VN: Q +14,3 mỗi trận.
   - Server giả, bản đồ `f06e9b26`, có lập trước: L20 D200 Q685 (không Rust Q670), thời gian phản hồi 15,6 s, replay khớp.
+- **Kết quả đo bản nới** (27/11, `rs_safe_ld` + `rs_day0_lex`, so với bản 25/11 chiều):
+  - Cả trận 60 cặp (8 bản đồ contest, 12 bản đồ sinh, 3 seed): Q +3,4 ± 1,2 mỗi trận, thắng Q 41/12, tổng D +1, không trận nào giảm D, không mất L.
+  - Sảnh 10 đội kiểu Nhật 90 cặp: tổng D +14, Q +39, không mất L. 30 seed thêm trên bản đồ mẫu: D +10, Q +36.
+  - Lập lại từng ngày từ đúng trạng thái của 8 trận contest (27 s mỗi ngày): +70 phần, không ngày nào thấp D hơn, không ngày nào quá hạn.
+  - Bản đồ thiếu xăng `1addebd7` dao động khoảng 120 Q theo seed ở cả hai bản; chưa sửa.
+  - Biến thể `rs3v` / `ta_rs2` trong `thi_nghiem_ai` ghim `rs_safe_ld` 0, `rs_day0_lex` 0 để tái hiện bản 25/11.
   - Bản đầu chưa có điều kiện nhận: Q +21,5 mỗi trận, nhưng mất D trên bản đồ vòng 1 Nhật (−0,5 và −1,4 mỗi trận).
 - Build một lần (Rust edition 2021, đã thử với cargo 1.99.1; crate không có thư viện ngoài nên không tải gì từ mạng): `cd rust/tour && cargo build --release --offline`. Không có file `rust/tour/target/release/tour(.exe)` thì bot bỏ qua bước này.
 

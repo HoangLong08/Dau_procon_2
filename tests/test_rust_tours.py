@@ -52,6 +52,73 @@ class RustToursTest(unittest.TestCase):
     def test_off_by_default(self):
         self.assertEqual(Weights().rs_seconds, 0.0)
         self.assertEqual((Weights().rs_look, Weights().rs_ready), (1.0, 1.0))
+        # 27/11: nới hai điều kiện ở ngày D an toàn và ngày 0 (chỉ có tác dụng khi rs_seconds > 0)
+        self.assertEqual((Weights().rs_safe_ld, Weights().rs_day0_lex, Weights().rs_safe_free), (1.0, 1.0, 0.0))
+
+    def test_safe_days_skip_the_fuel_gate_when_asked(self):
+        # rs_safe_free (26/11): ngày D an toàn (soft_unit > 0 sau day_weights) bỏ rs_ready; ngày chưa
+        # an toàn (strategy.day_weights đặt soft_unit = 0) thì vẫn giữ
+        cfg = generate(seed=4, size=10, agents=3, days=3)
+        agents = [AgentState(rules.PATROL, cfg.agent_starts[i], cfg.fuel_limits) for i in range(cfg.n_agents)]
+        for soft_unit, taken in ((20.0, True), (0.0, False)):
+            ctx = make_context(cfg, 0, agents, {}, [s.stocks for s in cfg.spots], set(),
+                               weights=Weights(rs_seconds=0.3, rs_safe_free=1.0, soft_unit=soft_unit))
+            ctx = dataclasses.replace(ctx, next_steps=cfg.fuel_limits)
+            idle = DaySolution(tours=[[] for _ in ctx.patrols], meets=[], waits={})
+            idle_dec = decode(ctx, idle)
+            _, dec = rust_start(ctx, idle, idle_dec, None, lambda s, d: None)
+            self.assertEqual(dec is not idle_dec, taken, f"soft_unit {soft_unit}")
+
+    def test_safe_ld_keeps_the_fuel_gate_only_while_fuel_binds(self):
+        # rs_safe_ld (26/11): ngày D an toàn bỏ rs_ready khi một bình đủ cho mọi ngày còn lại,
+        # còn xăng là ràng buộc (fuel_limits < số bước lớn nhất còn lại) thì giữ
+        cfg = generate(seed=4, size=10, agents=3, days=3)
+        agents = [AgentState(rules.PATROL, cfg.agent_starts[i], cfg.fuel_limits) for i in range(cfg.n_agents)]
+        for rest, taken in ((cfg.fuel_limits, True), (cfg.fuel_limits + 1, False)):
+            cfg.day_steps = [cfg.day_steps[0]] + [rest] * (len(cfg.day_steps) - 1)
+            ctx = make_context(cfg, 0, agents, {}, [s.stocks for s in cfg.spots], set(),
+                               weights=Weights(rs_seconds=0.3, rs_safe_ld=1.0))
+            ctx = dataclasses.replace(ctx, next_steps=cfg.fuel_limits)
+            idle = DaySolution(tours=[[] for _ in ctx.patrols], meets=[], waits={})
+            idle_dec = decode(ctx, idle)
+            _, dec = rust_start(ctx, idle, idle_dec, None, lambda s, d: None)
+            self.assertEqual(dec is not idle_dec, taken, f"bước còn lại {rest}")
+
+    def test_safe_ld_compares_only_l_and_d_of_the_lookahead(self):
+        # chơi tiếp cho bài Rust ít Q hơn nhưng cùng (chuỗi mới, D): rs_look bác, rs_safe_ld nhận;
+        # ít D hơn thì cả hai đều bác
+        ctx0 = small_ctx(seed=5, size=10)
+        idle = DaySolution(tours=[[] for _ in ctx0.patrols], meets=[], waits={})
+        for d_off, q_off, taken in ((0, -10 ** 6, True), (-1, 0, False)):
+            for ld in (0.0, 1.0):
+                ctx = dataclasses.replace(ctx0, weights=Weights(rs_seconds=0.3, rs_ready=0.0, rs_safe_ld=ld))
+                idle_dec = decode(ctx, idle)
+                base = lexicographic_gain(ctx, idle_dec.result)
+
+                def look(d):
+                    # tổng hôm nay + chơi tiếp của bài Rust: cùng (chuỗi mới, D) với bài đứng yên,
+                    # cộng d_off vào D và q_off vào Q
+                    if d is idle_dec:
+                        return (0, 0, 0)
+                    m = lexicographic_gain(ctx, d.result)
+                    return (base[0] - m[0], base[1] - m[1] + d_off, q_off)
+                _, dec = rust_start(ctx, idle, idle_dec, None, lambda s, d: None, lookahead=look)
+                self.assertEqual(dec is not idle_dec, taken and ld > 0, f"D {d_off} Q {q_off} ld {ld}")
+
+    def test_day0_takes_more_servings_by_the_lexicographic_gain(self):
+        # rs_day0_lex: ngày 0 bài Rust có (chuỗi mới, D, Q) cao hơn thì được nhận dù score_day không
+        # cao hơn (ở đây ép bằng một bài đang có điểm rất cao)
+        ctx = small_ctx(seed=5, size=10, weights=Weights(rs_seconds=0.3, rs_day0_lex=1.0, rs_ready=0.0,
+                                                         rs_look=0.0))
+        idle = DaySolution(tours=[[] for _ in ctx.patrols], meets=[], waits={})
+        idle_dec = decode(ctx, idle)
+        idle_dec.score = 1e18
+        _, dec = rust_start(ctx, idle, idle_dec, None, lambda s, d: None)
+        self.assertIsNot(dec, idle_dec)
+        off = dataclasses.replace(ctx, weights=Weights(rs_seconds=0.3, rs_ready=0.0, rs_look=0.0,
+                                                       rs_day0_lex=0.0))
+        _, dec = rust_start(off, idle, idle_dec, None, lambda s, d: None)
+        self.assertIs(dec, idle_dec)
 
     def test_match_commands_turn_it_on(self):
         # bật ở lệnh thi đấu (--rust-seconds), không bật trong Weights(): test, bench, sim giữ tất định
@@ -80,7 +147,7 @@ class RustToursTest(unittest.TestCase):
         agents = [AgentState(rules.PATROL, cfg.agent_starts[i], cfg.fuel_limits) for i in range(cfg.n_agents)]
         for ready in (1.0, 0.0):
             ctx = make_context(cfg, 0, agents, {}, [s.stocks for s in cfg.spots], set(),
-                               weights=Weights(rs_seconds=0.3, rs_ready=ready))
+                               weights=Weights(rs_seconds=0.3, rs_ready=ready, rs_safe_ld=0.0))
             ctx = dataclasses.replace(ctx, next_steps=cfg.fuel_limits)
             idle = DaySolution(tours=[[] for _ in ctx.patrols], meets=[], waits={})
             idle_dec = decode(ctx, idle)

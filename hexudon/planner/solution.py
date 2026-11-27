@@ -199,6 +199,22 @@ class Weights:
     #: 1: chỉ nhận bài Rust khi xăng sẵn cho ngày mai của xe tuần tra (tổng min(xăng cuối
     #: ngày, số bước ngày mai)) không ít hơn bài đang có: bộ giải không tính xăng ngày mai
     rs_ready: float = 1.0
+    #: 1 (26/11): ngày D an toàn (soft_unit còn > 0 sau day_weights: đã đủ L và hôm qua đạt trần
+    #: D) thì bỏ rs_ready và rs_look, nhận bài Rust theo score_day. Hai điều kiện đó giữ D trên bản
+    #: đồ D khan hiếm; ở 8 trận VN 25–26/11 (D luôn chạm trần) chúng bỏ 80 phần
+    rs_safe_free: float = 0.0
+    #: 1 (26/11, mặc định từ 27/11): ngày 0 nhận bài Rust khi (chuỗi mới, D, Q) hôm nay cao hơn
+    #: bài đang có (vẫn phải qua rs_ready, rs_look), thay vì so score_day: ngày 0 các hạng mục cuối
+    #: ngày tính theo B át số phần (8 trận: bỏ 21 phần ở ngày 0)
+    rs_day0_lex: float = 1.0
+    #: 1 (26/11, mặc định từ 27/11; thay cho rs_safe_free): ngày D an toàn vẫn giữ hai điều kiện
+    #: nhưng nới ra: rs_look chỉ so (chuỗi mới, D) của hôm nay + các ngày sau, không so Q dự báo;
+    #: rs_ready chỉ giữ khi xăng còn là ràng buộc (fuel_limits < số bước lớn nhất của các ngày còn
+    #: lại). rs_safe_free bỏ hẳn hai điều kiện thì mất D ở ngày ngắn kế sau (gen:1000 ngày 7, 64
+    #: bước) và dao động mạnh trên bản đồ thiếu xăng 1addebd7. Cổng (cùng rs_day0_lex, so rs3v):
+    #: cả trận 60 cặp Q +3,4 ± 1,2, D +1, không trận nào giảm D; sảnh kiểu Nhật 90 cặp D +14,
+    #: không mất L; 30 seed mẫu D +10; lập lại từng ngày 8 trận contest +70 phần
+    rs_safe_ld: float = 1.0
 
     # --- số phần trong ngày (20/11/2026, sau 2 contest thua DAU 2 tối 19/11) ---
     #: V_near đếm chuỗi xe tuần tra với tới trong ngần này phần của ngày mai. 0,5 = như cũ; 1 = chỉ

@@ -304,6 +304,16 @@ def pick_by_lookahead(ctx: DayContext, best_sol: DaySolution, best_dec: Decoded,
     return sol, dec, "rollout", info
 
 
+#: chẩn đoán (thi_nghiem_ai/chan_doan_q_ngay.py): đặt một dict thì plan_day và rust_start ghi
+#: (L, D, Q) hôm nay sau từng bước vào đó. None (mặc định) thì không ghi gì, không đổi hành vi
+TRACE: Optional[dict] = None
+
+
+def _trace(key: str, value) -> None:
+    if TRACE is not None:
+        TRACE[key] = value
+
+
 def fuel_ready(ctx: DayContext, decoded: Decoded) -> int:
     """Xăng sẵn cho ngày mai: tổng min(xăng cuối ngày, số bước ngày mai) của các xe tuần tra
     (0 ở ngày cuối)."""
@@ -346,20 +356,41 @@ def rust_start(ctx: DayContext, sol: DaySolution, decoded: Decoded, deadline: Op
         return sol, decoded
     cand, dec = ensure_new_chains(ctx, cand, dec)
     cand, dec = ensure_today_chains(ctx, cand, dec, deadline=deadline)
+    if TRACE is not None:
+        TRACE["rs"] = {"gain": list(lexicographic_gain(ctx, dec.result)) if dec.result.ok else None,
+                       "fuel_ready": [fuel_ready(ctx, dec), fuel_ready(ctx, decoded)]}
     if dec.score <= decoded.score:
+        lex = (w.rs_day0_lex > 0 and ctx.day == 0 and decoded.result.ok
+               and lexicographic_gain(ctx, dec.result) > lexicographic_gain(ctx, decoded.result))
+        if not lex:
+            _trace("rs_ket_qua", "điểm không cao hơn")
+            return sol, decoded
+    # ngày D an toàn: rs_safe_free bỏ hai điều kiện giữ D, chỉ còn so điểm; rs_safe_ld giữ chúng
+    # nhưng chỉ so L, D của chơi tiếp, và bỏ rs_ready khi một bình đủ cho mọi ngày còn lại
+    d_safe = w.soft_unit > 0 and w.soft_auto > 0
+    safe = d_safe and w.rs_safe_free > 0
+    ld = d_safe and not safe and w.rs_safe_ld > 0
+    cfg = ctx.config
+    fuel_free = ld and cfg.fuel_limits >= max(cfg.day_steps[ctx.day + 1:], default=0)
+    if not safe and not fuel_free and w.rs_ready > 0 and fuel_ready(ctx, dec) < fuel_ready(ctx, decoded):
+        _trace("rs_ket_qua", "rs_ready")
         return sol, decoded
-    if w.rs_ready > 0 and fuel_ready(ctx, dec) < fuel_ready(ctx, decoded):
-        return sol, decoded
-    if lookahead is not None and decoded.result.ok and dec.result.ok:
+    if not safe and lookahead is not None and decoded.result.ok and dec.result.ok:
         mine = lexicographic_gain(ctx, dec.result)
         theirs = lexicographic_gain(ctx, decoded.result)
         hard = today_hard_len(ctx, [decoded.result, dec.result])
         if mine[:hard] < theirs[:hard]:
+            _trace("rs_ket_qua", "kém L/D")
             return sol, decoded
         total_r = tuple(a + b for a, b in zip(mine, lookahead(dec)))
         total_s = tuple(a + b for a, b in zip(theirs, lookahead(decoded)))
+        _trace("rs_look", [list(total_r), list(total_s)])
+        if ld:
+            total_r, total_s = total_r[:2], total_s[:2]     # (chuỗi mới, D): Q đã so ở score_day
         if total_r < total_s:
+            _trace("rs_ket_qua", "rs_look")
             return sol, decoded
+    _trace("rs_ket_qua", "nhận")
     better(cand, dec)
     return cand, dec
 
@@ -459,8 +490,10 @@ def plan_day(
         look_rs = lookahead if (w.rs_look > 0 and w.rollout_k >= 1 and ctx.days_left > 0) else None
         start_sol, start_dec = rust_start(ctx, start_sol, start_dec, deadline, better, seed=seed,
                                           lookahead=look_rs)
+    _trace("truoc_or", list(lexicographic_gain(ctx, start_dec.result)) if start_dec.result.ok else None)
     if w.or_seconds > 0:
         start_sol, start_dec = orienteering_start(ctx, start_sol, start_dec, deadline, better)
+    _trace("xuat_phat", list(lexicographic_gain(ctx, start_dec.result)) if start_dec.result.ok else None)
     # R3: ngày cuối end_value = 0, nên đạt cận trên của hôm nay là xong: dừng ngay để bài
     # cuối được gửi sớm (thời gian phản hồi là tiêu chí 4). Ngày khác vẫn tìm tiếp, vì
     # trạng thái cuối ngày còn cải thiện được và D, Q các ngày sau xếp trên thời gian.
@@ -512,6 +545,7 @@ def plan_day(
         best_sol, best_dec = patched_sol, patched
         better(best_sol, best_dec)
     reached = stop is not None and stop(best_dec)
+    _trace("pha1", list(lexicographic_gain(ctx, best_dec.result)) if best_dec.result.ok else None)
 
     # R4: chọn trong các nghiệm khác nhau về trạng thái cuối ngày theo (L, D, Q) của hôm
     # nay cộng các ngày sau khi chơi tiếp bằng bộ dựng tham lam
@@ -535,6 +569,7 @@ def plan_day(
         deadline_r = None if span is None else now + (1.0 - share) * span
         best_sol, best_dec, picked, roll = pick_by_lookahead(ctx, best_sol, best_dec, elite, lookahead,
                                                              deadline_r, extra=extra)
+        _trace("r4", {"gain": list(lexicographic_gain(ctx, best_dec.result)) if best_dec.result.ok else None, "doi": bool(picked)})
         if roll["total"] is not None:
             known = (best_dec.plan, roll["total"])
 
@@ -614,6 +649,7 @@ def plan_day(
 
     final = best_dec
     final.picked_by = picked
+    _trace("cuoi", list(lexicographic_gain(ctx, final.result)) if final.result.ok else None)
     if known is not None and known[0] == final.plan:
         final.total = known[1]
     if on_plan is not None and final is not first:
